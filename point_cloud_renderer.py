@@ -76,10 +76,10 @@ class XMLTemplates:
     <shape type="rectangle">
         <transform name="toWorld">
             <scale x="10" y="10" z="1"/>
-            <lookat origin="-6,4,10" target="0,0,0" up="0,0,1"/>
+            <lookat origin="-4,4,20" target="0,0,0" up="0,0,1"/>
         </transform>
         <emitter type="area">
-            <rgb name="radiance" value="4,4,4"/>
+            <rgb name="radiance" value="8,8,8"/>
         </emitter>
     </shape>
 </scene>
