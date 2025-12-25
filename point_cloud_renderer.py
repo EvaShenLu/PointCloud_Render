@@ -39,7 +39,7 @@ class XMLTemplates:
         <string name="distribution" value="ggx"/>
         <float name="alpha" value="0.1"/>
         <float name="intIOR" value="1.46"/>
-        <rgb name="diffuseReflectance" value="0.3,0.3,0.3"/>
+        <rgb name="diffuseReflectance" value="1,1,1"/>
     </bsdf>
 
     <bsdf type="roughplastic" id="matteMarble">
@@ -57,11 +57,8 @@ class XMLTemplates:
             <translate x="{}" y="{}" z="{}"/>
         </transform>
 
-    <bsdf type="roughplastic">
-        <string name="distribution" value="ggx"/>
-        <float name="intIOR" value="1.55"/>
-        <float name="alpha" value="0.25"/>
-        <rgb name="diffuseReflectance" value="{},{},{}"/>
+    <bsdf type="diffuse">
+        <rgb name="reflectance" value="{},{},{}"/>
     </bsdf>
 
     </shape>
@@ -79,10 +76,10 @@ class XMLTemplates:
     <shape type="rectangle">
         <transform name="toWorld">
             <scale x="10" y="10" z="1"/>
-            <lookat origin="-4,4,20" target="0,0,0" up="0,0,1"/>
+            <lookat origin="-6,4,10" target="0,0,0" up="0,0,1"/>
         </transform>
         <emitter type="area">
-            <rgb name="radiance" value="8,8,8"/>
+            <rgb name="radiance" value="4,4,4"/>
         </emitter>
     </shape>
 </scene>
@@ -102,23 +99,21 @@ class PointCloudRenderer:
 
     @staticmethod
     def compute_color(x, y, z, noise_seed=0):
-        # 基于归一化的坐标计算渐变（x, y, z 在 [0, 1] 范围内）
-        # 使用z坐标作为主要渐变方向（从下到上）
-        z_factor = z  # z已经在[0,1]范围内
+        # 用 z 作为主渐变
+        t = np.clip(z, 0.0, 1.0)
         
-        # 计算到中心的距离（增强渐变效果）
-        center_x, center_y, center_z = 0.5, 0.5, 0.5
-        distance_from_center = np.sqrt((x - center_x)**2 + (y - center_y)**2 + (z - center_z)**2)
-        distance_factor = np.clip(distance_from_center / 0.866, 0, 1)  # 0.866是最大距离
+        # 用 gamma / power 拉开中间对比（增强高亮差异）
+        t = t ** 0.6  # < 1：增强高亮差异
         
-        # 结合z坐标和距离创建明显的渐变（从深灰到浅灰）
-        base_gray = z_factor * 0.6 + (1 - distance_factor) * 0.2
+        # 深灰 → 浅灰（范围故意拉开）
+        g = 0.15 + 0.7 * t
         
-        # 添加基于正弦函数的噪声来增强纹理感（模拟大理石的细微纹理）
-        noise = np.sin(x * 15 + y * 11 + z * 19 + noise_seed) * 0.1
-        gray_value = np.clip(base_gray * 0.5 + 0.2 + noise, 0.12, 0.85)
+        # 添加非常轻的随机纹理扰动（不用正弦，太规则）
+        np.random.seed(noise_seed)
+        noise = 0.03 * np.random.randn()
+        g = np.clip(g + noise, 0.12, 0.85)
         
-        return np.array([gray_value, gray_value, gray_value])
+        return np.array([g, g, g])
 
     @staticmethod
     def standardize_point_cloud(pcl):
