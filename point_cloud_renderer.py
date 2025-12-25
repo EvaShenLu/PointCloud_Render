@@ -102,7 +102,7 @@ class PointCloudRenderer:
             return np.load(self.file_path)['pred']
         elif file_extension == '.ply':
             ply_data = PlyData.read(self.file_path)
-            return np.column_stack(ply_data['vertex'][t] for t in ('x', 'y', 'z'))
+            return np.column_stack([ply_data['vertex'][t] for t in ('x', 'y', 'z')])
         else:
             raise ValueError('Unsupported file format.')
 
