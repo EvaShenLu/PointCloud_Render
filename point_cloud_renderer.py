@@ -107,22 +107,7 @@ class PointCloudRenderer:
         t = t ** 0.5  # 更陡的曲线，增强高亮区域差异
         
         # 扩大灰度范围：从深灰（0.08）到浅灰（0.6），增强渐变对比
-        base_gray = 0.08 + 0.52 * t
-        
-        # 多层噪声模拟大理石纹理
-        # 第一层：大尺度纹理（模拟大理石的条纹）
-        noise1 = np.sin(x * 8 + y * 6 + z * 10 + noise_seed * 0.1) * 0.08
-        
-        # 第二层：中尺度纹理（模拟大理石的细微纹理）
-        noise2 = np.sin(x * 20 + y * 15 + z * 25 + noise_seed * 0.3) * 0.05
-        
-        # 第三层：小尺度随机噪声（增加自然感）
-        np.random.seed(noise_seed)
-        noise3 = np.random.randn() * 0.04
-        
-        # 结合所有噪声层
-        total_noise = noise1 + noise2 + noise3
-        g = np.clip(base_gray + total_noise, 0.06, 0.65)
+        g = 0.08 + 0.52 * t
         
         return np.array([g, g, g])
 
