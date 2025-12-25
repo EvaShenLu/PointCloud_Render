@@ -59,8 +59,8 @@ class XMLTemplates:
 
     <bsdf type="roughplastic">
         <string name="distribution" value="ggx"/>
-        <float name="intIOR" value="1.5"/>
-        <float name="alpha" value="0.6"/>
+        <float name="intIOR" value="1.55"/>
+        <float name="alpha" value="0.25"/>
         <rgb name="diffuseReflectance" value="{},{},{}"/>
     </bsdf>
 
@@ -102,11 +102,14 @@ class PointCloudRenderer:
 
     @staticmethod
     def compute_color(x, y, z):
-        # 基于位置计算灰色渐变值（0.3到0.7之间）
+        # 基于位置计算灰色渐变值（从深灰0.15到浅灰0.75，增强对比度）
         vec = np.clip(np.array([x, y, z]), 0.001, 1.0)
         vec /= np.linalg.norm(vec)
-        # 将归一化后的向量转换为灰色值（使用向量的某个分量或平均值）
-        gray_value = np.clip(np.mean(vec) * 0.8 + 0.3, 0.3, 0.7)
+        # 使用位置信息创建更明显的渐变
+        # 结合多个分量来创建更丰富的渐变效果
+        position_factor = (vec[0] + vec[1] + vec[2]) / 3.0
+        # 映射到更宽的黑灰范围（0.15到0.75）
+        gray_value = np.clip(position_factor * 0.6 + 0.15, 0.15, 0.75)
         return np.array([gray_value, gray_value, gray_value])
 
     @staticmethod
