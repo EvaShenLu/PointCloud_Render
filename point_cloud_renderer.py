@@ -69,15 +69,15 @@ class XMLTemplates:
         <ref name="bsdf" id="surfaceMaterial"/>
         <transform name="toWorld">
             <scale x="10" y="10" z="1"/>
-            <translate x="0" y="0" z="-0.5"/>
+            <translate x="0" y="0" z="-0.2"/>
         </transform>
     </shape>
     
-    <!-- 主光源：从上方偏左，角度更倾斜以增强影子 -->
+    <!-- 顶光：从正上方照射，产生明显的阴影 -->
     <shape type="rectangle">
         <transform name="toWorld">
             <scale x="8" y="8" z="1"/>
-            <lookat origin="-3,3,12" target="0,0,0" up="0,0,1"/>
+            <lookat origin="0,0,15" target="0,0,0" up="0,1,0"/>
         </transform>
         <emitter type="area">
             <rgb name="radiance" value="4,4,4"/>
