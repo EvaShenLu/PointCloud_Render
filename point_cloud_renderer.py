@@ -73,13 +73,14 @@ class XMLTemplates:
         </transform>
     </shape>
     
+    <!-- 主光源：从上方偏左，角度更倾斜以增强影子 -->
     <shape type="rectangle">
         <transform name="toWorld">
-            <scale x="10" y="10" z="1"/>
-            <lookat origin="-4,4,20" target="0,0,0" up="0,0,1"/>
+            <scale x="8" y="8" z="1"/>
+            <lookat origin="-3,3,12" target="0,0,0" up="0,0,1"/>
         </transform>
         <emitter type="area">
-            <rgb name="radiance" value="8,8,8"/>
+            <rgb name="radiance" value="4,4,4"/>
         </emitter>
     </shape>
 </scene>
@@ -99,19 +100,20 @@ class PointCloudRenderer:
 
     @staticmethod
     def compute_color(x, y, z, noise_seed=0):
-        # 用 z 作为主渐变
+        # 用 z 作为主渐变（从下到上：z小=深灰，z大=浅灰）
+        # 确保渐变方向正确，避免中间白两边灰
         t = np.clip(z, 0.0, 1.0)
         
-        # 用 gamma / power 拉开中间对比（增强高亮差异）
-        t = t ** 0.6  # < 1：增强高亮差异
+        # 用 gamma 曲线增强对比
+        t = t ** 0.7
         
-        # 深灰 → 浅灰（范围故意拉开）
-        g = 0.15 + 0.7 * t
+        # 整体偏黑灰：从深灰（0.1）到中灰（0.4），不再到浅灰
+        g = 0.1 + 0.3 * t
         
-        # 添加非常轻的随机纹理扰动（不用正弦，太规则）
+        # 添加非常轻的随机纹理扰动
         np.random.seed(noise_seed)
-        noise = 0.03 * np.random.randn()
-        g = np.clip(g + noise, 0.12, 0.85)
+        noise = 0.02 * np.random.randn()
+        g = np.clip(g + noise, 0.08, 0.45)
         
         return np.array([g, g, g])
 
