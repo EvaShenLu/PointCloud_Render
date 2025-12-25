@@ -1,6 +1,7 @@
 import numpy as np
 import sys
 import os
+import glob
 from plyfile import PlyData
 import mitsuba as mi
 
@@ -92,11 +93,12 @@ class PointCloudRenderer:
     XML_BALL_SEGMENT = XMLTemplates.BALL_SEGMENT
     XML_TAIL = XMLTemplates.TAIL
 
-    def __init__(self, file_path):
+    def __init__(self, file_path, output_folder=None):
         self.file_path = file_path
         self.folder, full_filename = os.path.split(file_path)
         self.folder = self.folder or '.'
         self.filename, _ = os.path.splitext(full_filename)
+        self.output_folder = output_folder
 
     @staticmethod
     def compute_color(x, y, z, noise_seed=0):
@@ -172,6 +174,7 @@ class PointCloudRenderer:
         if len(pcl_data.shape) < 3:
             pcl_data = pcl_data[np.newaxis, :, :]
 
+        total_frames = len(pcl_data)
         for index, pcl in enumerate(pcl_data):
             pcl = self.standardize_point_cloud(pcl)
             pcl = pcl[:, [2, 0, 1]]
@@ -179,22 +182,71 @@ class PointCloudRenderer:
             pcl[:, 2] += 0.0125
 
             output_filename = f'{self.filename}_{index:02d}'
-            output_file_path = f'{self.folder}/{output_filename}'
-            print(f'Processing {output_filename}...')
+            if self.output_folder:
+                # 确保输出文件夹存在
+                os.makedirs(self.output_folder, exist_ok=True)
+                output_file_path = os.path.join(self.output_folder, output_filename)
+            else:
+                output_file_path = os.path.join(self.folder, output_filename)
+            
+            if total_frames > 1:
+                print(f'  Frame {index+1}/{total_frames}: Generating XML...', end=' ', flush=True)
+            else:
+                print(f'  Generating XML...', end=' ', flush=True)
+            
             xml_content = self.generate_xml_content(pcl)
             xml_file_path = self.save_xml_content_to_file(output_file_path, xml_content)
+            
+            print('Rendering...', end=' ', flush=True)
             rendered_scene = self.render_scene(xml_file_path)
+            
+            print('Saving...', end=' ', flush=True)
             self.save_scene(output_file_path, rendered_scene)
-            print(f'Finished processing {output_filename}.')
+            
+            print('Done!')
 
 
 def main(argv):
-    if len(argv) < 2:
-        print('Filename not provided as argument.')
+    # 设置输入文件夹和输出文件夹
+    input_folder = 'ply'
+    output_folder = 'render'
+    target_files = ['pts_0.ply', 'pts_1.ply']
+    
+    # 确保输出文件夹存在
+    os.makedirs(output_folder, exist_ok=True)
+    
+    # 查找目标文件
+    ply_files = []
+    for target_file in target_files:
+        file_path = os.path.join(input_folder, target_file)
+        if os.path.isfile(file_path):
+            ply_files.append(file_path)
+        else:
+            print(f'Warning: File not found: {file_path}')
+    
+    if not ply_files:
+        print(f'No target files found in folder: {input_folder}')
+        print(f'Looking for: {target_files}')
         return
-
-    renderer = PointCloudRenderer(argv[1])
-    renderer.process()
+    
+    total_files = len(ply_files)
+    print(f'Found {total_files} target file(s) in folder: {input_folder}')
+    print(f'Output folder: {output_folder}')
+    print('=' * 60)
+    
+    for idx, ply_file in enumerate(ply_files, 1):
+        print(f'\n[{idx}/{total_files}] ({idx*100//total_files}%) Processing: {os.path.basename(ply_file)}')
+        print('-' * 60)
+        try:
+            renderer = PointCloudRenderer(ply_file, output_folder=output_folder)
+            renderer.process()
+            print(f'✓ Successfully processed: {os.path.basename(ply_file)}')
+        except Exception as e:
+            print(f'✗ Error processing {os.path.basename(ply_file)}: {str(e)}')
+    
+    print('\n' + '=' * 60)
+    print(f'Batch processing completed! Processed {total_files} files.')
+    print(f'Output files saved to: {output_folder}/')
 
 
 if __name__ == '__main__':
