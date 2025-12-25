@@ -37,9 +37,9 @@ class XMLTemplates:
 
     <bsdf type="roughplastic" id="surfaceMaterial">
         <string name="distribution" value="ggx"/>
-        <float name="alpha" value="0.05"/>
+        <float name="alpha" value="0.1"/>
         <float name="intIOR" value="1.46"/>
-        <rgb name="diffuseReflectance" value="1,1,1"/> <!-- default 0.5 -->
+        <rgb name="diffuseReflectance" value="0.3,0.3,0.3"/>
     </bsdf>
 
     <bsdf type="roughplastic" id="matteMarble">
@@ -82,7 +82,7 @@ class XMLTemplates:
             <lookat origin="-4,4,20" target="0,0,0" up="0,0,1"/>
         </transform>
         <emitter type="area">
-            <rgb name="radiance" value="6,6,6"/>
+            <rgb name="radiance" value="8,8,8"/>
         </emitter>
     </shape>
 </scene>
@@ -101,15 +101,23 @@ class PointCloudRenderer:
         self.filename, _ = os.path.splitext(full_filename)
 
     @staticmethod
-    def compute_color(x, y, z):
-        # 基于位置计算灰色渐变值（从深灰0.15到浅灰0.75，增强对比度）
-        vec = np.clip(np.array([x, y, z]), 0.001, 1.0)
-        vec /= np.linalg.norm(vec)
-        # 使用位置信息创建更明显的渐变
-        # 结合多个分量来创建更丰富的渐变效果
-        position_factor = (vec[0] + vec[1] + vec[2]) / 3.0
-        # 映射到更宽的黑灰范围（0.15到0.75）
-        gray_value = np.clip(position_factor * 0.6 + 0.15, 0.15, 0.75)
+    def compute_color(x, y, z, noise_seed=0):
+        # 基于归一化的坐标计算渐变（x, y, z 在 [0, 1] 范围内）
+        # 使用z坐标作为主要渐变方向（从下到上）
+        z_factor = z  # z已经在[0,1]范围内
+        
+        # 计算到中心的距离（增强渐变效果）
+        center_x, center_y, center_z = 0.5, 0.5, 0.5
+        distance_from_center = np.sqrt((x - center_x)**2 + (y - center_y)**2 + (z - center_z)**2)
+        distance_factor = np.clip(distance_from_center / 0.866, 0, 1)  # 0.866是最大距离
+        
+        # 结合z坐标和距离创建明显的渐变（从深灰到浅灰）
+        base_gray = z_factor * 0.6 + (1 - distance_factor) * 0.2
+        
+        # 添加基于正弦函数的噪声来增强纹理感（模拟大理石的细微纹理）
+        noise = np.sin(x * 15 + y * 11 + z * 19 + noise_seed) * 0.1
+        gray_value = np.clip(base_gray * 0.5 + 0.2 + noise, 0.12, 0.85)
+        
         return np.array([gray_value, gray_value, gray_value])
 
     @staticmethod
@@ -133,9 +141,18 @@ class PointCloudRenderer:
 
     def generate_xml_content(self, pcl):
         xml_segments = [self.XML_HEAD]
-        for point in pcl:
+        # 计算点云的边界用于归一化颜色计算
+        pcl_min = np.min(pcl, axis=0)
+        pcl_max = np.max(pcl, axis=0)
+        pcl_range = pcl_max - pcl_min
+        pcl_center = (pcl_min + pcl_max) / 2.0
+        
+        for idx, point in enumerate(pcl):
+            # 归一化坐标用于颜色计算（使渐变更明显）
+            normalized_point = (point - pcl_min) / (pcl_range + 1e-8)
             color = self.compute_color(
-                point[0] + 0.5, point[1] + 0.5, point[2] + 0.5 - 0.0125)
+                normalized_point[0], normalized_point[1], normalized_point[2], 
+                noise_seed=idx)
             xml_segments.append(self.XML_BALL_SEGMENT.format(
                 point[0], point[1], point[2], *color))
         xml_segments.append(self.XML_TAIL)
