@@ -41,11 +41,18 @@ class XMLTemplates:
         <float name="intIOR" value="1.46"/>
         <rgb name="diffuseReflectance" value="1,1,1"/> <!-- default 0.5 -->
     </bsdf>
+
+    <bsdf type="roughplastic" id="matteMarble">
+        <string name="distribution" value="ggx"/>
+        <float name="intIOR" value="1.5"/>
+        <float name="alpha" value="0.6"/>
+        <rgb name="diffuseReflectance" value="0.5,0.5,0.5"/>
+    </bsdf>
 """
     # XML template for a single point (ball) in the scene
     BALL_SEGMENT = """
     <shape type="sphere">
-        <float name="radius" value="0.015"/>
+        <float name="radius" value="0.01"/>
         <transform name="toWorld">
             <translate x="{}" y="{}" z="{}"/>
         </transform>
@@ -53,7 +60,7 @@ class XMLTemplates:
     <bsdf type="roughplastic">
         <string name="distribution" value="ggx"/>
         <float name="intIOR" value="1.5"/>
-        <float name="alpha" value="0.35"/>
+        <float name="alpha" value="0.6"/>
         <rgb name="diffuseReflectance" value="{},{},{}"/>
     </bsdf>
 
@@ -95,11 +102,13 @@ class PointCloudRenderer:
 
     @staticmethod
     def compute_color(x, y, z):
+        # 基于位置计算灰色渐变值（0.3到0.7之间）
         vec = np.clip(np.array([x, y, z]), 0.001, 1.0)
         vec /= np.linalg.norm(vec)
-        return vec
+        # 将归一化后的向量转换为灰色值（使用向量的某个分量或平均值）
+        gray_value = np.clip(np.mean(vec) * 0.8 + 0.3, 0.3, 0.7)
+        return np.array([gray_value, gray_value, gray_value])
 
-    @staticmethod
     @staticmethod
     def standardize_point_cloud(pcl):
         center = np.mean(pcl, axis=0)
