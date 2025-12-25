@@ -6,6 +6,7 @@ import mitsuba as mi
 
 
 class XMLTemplates:
+    # XML template for the scene (camera, sampler, surface material, etc.)
     HEAD = """
 <scene version="0.6.0">
     <integrator type="path">
@@ -27,7 +28,13 @@ class XMLTemplates:
             <rfilter type="gaussian"/>
         </film>
     </sensor>
-    
+
+    <bsdf type="roughplastic" id="matteStone">
+        <string name="distribution" value="ggx"/>
+        <float name="intIOR" value="1.5"/>
+        <float name="alpha" value="0.35"/> 
+    </bsdf>
+
     <bsdf type="roughplastic" id="surfaceMaterial">
         <string name="distribution" value="ggx"/>
         <float name="alpha" value="0.05"/>
@@ -35,17 +42,24 @@ class XMLTemplates:
         <rgb name="diffuseReflectance" value="1,1,1"/> <!-- default 0.5 -->
     </bsdf>
 """
+    # XML template for a single point (ball) in the scene
     BALL_SEGMENT = """
     <shape type="sphere">
         <float name="radius" value="0.015"/>
         <transform name="toWorld">
             <translate x="{}" y="{}" z="{}"/>
         </transform>
-        <bsdf type="diffuse">
-            <rgb name="reflectance" value="{},{},{}"/>
-        </bsdf>
+
+    <bsdf type="roughplastic">
+        <string name="distribution" value="ggx"/>
+        <float name="intIOR" value="1.5"/>
+        <float name="alpha" value="0.35"/>
+        <rgb name="diffuseReflectance" value="{},{},{}"/>
+    </bsdf>
+
     </shape>
 """
+    # XML template for the ground plane and the background plane
     TAIL = """
     <shape type="rectangle">
         <ref name="bsdf" id="surfaceMaterial"/>
@@ -69,7 +83,6 @@ class XMLTemplates:
 
 
 class PointCloudRenderer:
-    POINTS_PER_OBJECT = 2048
     XML_HEAD = XMLTemplates.HEAD
     XML_BALL_SEGMENT = XMLTemplates.BALL_SEGMENT
     XML_TAIL = XMLTemplates.TAIL
@@ -87,12 +100,12 @@ class PointCloudRenderer:
         return vec
 
     @staticmethod
-    def standardize_point_cloud(pcl, points_per_object=POINTS_PER_OBJECT):
-        pt_indices = np.random.choice(pcl.shape[0], points_per_object, replace=False)
-        pcl = pcl[pt_indices]
+    @staticmethod
+    def standardize_point_cloud(pcl):
         center = np.mean(pcl, axis=0)
         scale = np.amax(pcl - np.amin(pcl, axis=0))
         return ((pcl - center) / scale).astype(np.float32)
+
 
     def load_point_cloud(self):
         file_extension = os.path.splitext(self.file_path)[1]
