@@ -52,7 +52,7 @@ class XMLTemplates:
     # XML template for a single point (ball) in the scene
     BALL_SEGMENT = """
     <shape type="sphere">
-        <float name="radius" value="0.015"/>
+        <float name="radius" value="0.01"/>
         <transform name="toWorld">
             <translate x="{}" y="{}" z="{}"/>
         </transform>
