@@ -52,7 +52,7 @@ class XMLTemplates:
     # XML template for a single point (ball) in the scene
     BALL_SEGMENT = """
     <shape type="sphere">
-        <float name="radius" value="0.01"/>
+        <float name="radius" value="0.015"/>
         <transform name="toWorld">
             <translate x="{}" y="{}" z="{}"/>
         </transform>
@@ -101,19 +101,28 @@ class PointCloudRenderer:
     @staticmethod
     def compute_color(x, y, z, noise_seed=0):
         # 用 z 作为主渐变（从下到上：z小=深灰，z大=浅灰）
-        # 确保渐变方向正确，避免中间白两边灰
         t = np.clip(z, 0.0, 1.0)
         
-        # 用 gamma 曲线增强对比
-        t = t ** 0.7
+        # 使用更强的gamma曲线增强对比度
+        t = t ** 0.5  # 更陡的曲线，增强高亮区域差异
         
-        # 整体偏黑灰：从深灰（0.1）到中灰（0.4），不再到浅灰
-        g = 0.1 + 0.3 * t
+        # 扩大灰度范围：从深灰（0.08）到浅灰（0.6），增强渐变对比
+        base_gray = 0.08 + 0.52 * t
         
-        # 添加非常轻的随机纹理扰动
+        # 多层噪声模拟大理石纹理
+        # 第一层：大尺度纹理（模拟大理石的条纹）
+        noise1 = np.sin(x * 8 + y * 6 + z * 10 + noise_seed * 0.1) * 0.08
+        
+        # 第二层：中尺度纹理（模拟大理石的细微纹理）
+        noise2 = np.sin(x * 20 + y * 15 + z * 25 + noise_seed * 0.3) * 0.05
+        
+        # 第三层：小尺度随机噪声（增加自然感）
         np.random.seed(noise_seed)
-        noise = 0.02 * np.random.randn()
-        g = np.clip(g + noise, 0.08, 0.45)
+        noise3 = np.random.randn() * 0.04
+        
+        # 结合所有噪声层
+        total_noise = noise1 + noise2 + noise3
+        g = np.clip(base_gray + total_noise, 0.06, 0.65)
         
         return np.array([g, g, g])
 
