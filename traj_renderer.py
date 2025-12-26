@@ -101,8 +101,8 @@ class TrajectoryRenderer:
         # 水滴形状：上半部分是球体，下半部分逐渐变尖
         n_segments = 20
         n_rings = 16
-        base_radius = 0.0075  # 基础半径（放大）
-        length = 0.025  # 水滴总长度（放大）
+        base_radius = 0.01  # 基础半径（进一步放大）
+        length = 0.03  # 水滴总长度（进一步放大）
         
         vertices = []
         normals = []
@@ -131,14 +131,17 @@ class TrajectoryRenderer:
                 
                 vertices.append([x, y, z])
                 
-                # 计算法线（从中心指向顶点）
-                if r > 1e-6:
-                    normal = np.array([x, y, z])
-                    normal = normal / np.linalg.norm(normal)
-                    normals.append(normal)
+                # 计算法线：从中心（0,0,0）指向顶点
+                # 对于所有顶点都使用相同的方法，确保法线正确
+                normal = np.array([x, y, z])
+                norm = np.linalg.norm(normal)
+                if norm > 1e-6:
+                    normal = normal / norm
                 else:
-                    # 尖端处的法线指向下方
-                    normals.append([0, 0, -1])
+                    # 如果顶点在原点（理论上不应该发生），使用默认法线
+                    normal = np.array([0, 0, 1])
+                
+                normals.append(normal)
         
         # 生成面
         for i in range(n_rings):
