@@ -102,15 +102,8 @@ class PointCloudRenderer:
 
     @staticmethod
     def compute_color(x, y, z, noise_seed=0):
-        # 用 z 作为主渐变（从下到上：z小=深灰，z大=浅灰）
-        t = np.clip(z, 0.0, 1.0)
-        
-        # 使用更强的gamma曲线增强对比度
-        t = t ** 0.5  # 更陡的曲线，增强高亮区域差异
-        
-        # 扩大灰度范围：从深灰（0.08）到浅灰（0.6），增强渐变对比
-        g = 0.08 + 0.52 * t
-        
+        # 固定灰色，不使用渐变
+        g = 0.3  # 中等灰色
         return np.array([g, g, g])
 
     @staticmethod
@@ -160,7 +153,6 @@ class PointCloudRenderer:
 
     @staticmethod
     def render_scene(xml_file_path):
-        # 尝试使用CUDA GPU，如果失败则回退到CPU
         try:
             mi.set_variant('cuda_ad_rgb')
             print('  Using CUDA GPU...', end=' ', flush=True)
@@ -217,19 +209,15 @@ class PointCloudRenderer:
 
 
 def main(argv):
-    # 设置输入文件夹和输出文件夹
     input_folder = 'ply'
     output_folder = 'render'
     
-    # 生成从 pts_0 到 pts_200 的文件列表
     start_idx = 0
     end_idx = 2
     target_files = [f'pts_{i}.ply' for i in range(start_idx, end_idx + 1)]
     
-    # 确保输出文件夹存在
     os.makedirs(output_folder, exist_ok=True)
     
-    # 查找目标文件
     ply_files = []
     for target_file in target_files:
         file_path = os.path.join(input_folder, target_file)
