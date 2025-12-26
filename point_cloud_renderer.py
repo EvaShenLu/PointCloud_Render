@@ -30,24 +30,11 @@ class XMLTemplates:
         </film>
     </sensor>
 
-    <bsdf type="roughplastic" id="matteStone">
-        <string name="distribution" value="ggx"/>
-        <float name="intIOR" value="1.5"/>
-        <float name="alpha" value="0.35"/> 
-    </bsdf>
-
     <bsdf type="roughplastic" id="surfaceMaterial">
         <string name="distribution" value="ggx"/>
         <float name="alpha" value="0.1"/>
         <float name="intIOR" value="1.46"/>
         <rgb name="diffuseReflectance" value="1,1,1"/>
-    </bsdf>
-
-    <bsdf type="roughplastic" id="matteMarble">
-        <string name="distribution" value="ggx"/>
-        <float name="intIOR" value="1.5"/>
-        <float name="alpha" value="0.6"/>
-        <rgb name="diffuseReflectance" value="0.5,0.5,0.5"/>
     </bsdf>
 """
     # XML template for a single point (ball) in the scene
@@ -74,7 +61,6 @@ class XMLTemplates:
         </transform>
     </shape>
     
-    <!-- 顶光：从正上方照射，产生明显的阴影 -->
     <shape type="rectangle">
         <transform name="toWorld">
             <scale x="8" y="8" z="1"/>
@@ -102,8 +88,7 @@ class PointCloudRenderer:
 
     @staticmethod
     def compute_color(x, y, z, noise_seed=0):
-        # 固定灰色，不使用渐变
-        g = 0.3  # 中等灰色
+        g = 0.3 
         return np.array([g, g, g])
 
     @staticmethod
@@ -127,14 +112,12 @@ class PointCloudRenderer:
 
     def generate_xml_content(self, pcl):
         xml_segments = [self.XML_HEAD]
-        # 计算点云的边界用于归一化颜色计算
         pcl_min = np.min(pcl, axis=0)
         pcl_max = np.max(pcl, axis=0)
         pcl_range = pcl_max - pcl_min
         pcl_center = (pcl_min + pcl_max) / 2.0
         
         for idx, point in enumerate(pcl):
-            # 归一化坐标用于颜色计算（使渐变更明显）
             normalized_point = (point - pcl_min) / (pcl_range + 1e-8)
             color = self.compute_color(
                 normalized_point[0], normalized_point[1], normalized_point[2], 
@@ -152,17 +135,23 @@ class PointCloudRenderer:
         return xml_file_path
 
     @staticmethod
-    def render_scene(xml_file_path):
+    def init_mitsuba_variant():
         try:
             mi.set_variant('cuda_ad_rgb')
-            print('  Using CUDA GPU...', end=' ', flush=True)
+            print('Using CUDA GPU (cuda_ad_rgb)')
+            return True
         except:
             try:
                 mi.set_variant('cuda_rgb')
-                print('  Using CUDA GPU...', end=' ', flush=True)
+                print('Using CUDA GPU (cuda_rgb)')
+                return True
             except:
                 mi.set_variant('scalar_rgb')
-                print('  Using CPU (GPU not available)...', end=' ', flush=True)
+                print('Using CPU (scalar_rgb) - GPU not available')
+                return False
+
+    @staticmethod
+    def render_scene(xml_file_path):
         scene = mi.load_file(xml_file_path)
         img = mi.render(scene)
         return img
@@ -185,7 +174,6 @@ class PointCloudRenderer:
 
             output_filename = f'{self.filename}_{index:02d}'
             if self.output_folder:
-                # 确保输出文件夹存在
                 os.makedirs(self.output_folder, exist_ok=True)
                 output_file_path = os.path.join(self.output_folder, output_filename)
             else:
@@ -209,6 +197,10 @@ class PointCloudRenderer:
 
 
 def main(argv):
+    # 初始化Mitsuba variant（只设置一次）
+    PointCloudRenderer.init_mitsuba_variant()
+    print('=' * 60)
+    
     input_folder = 'ply'
     output_folder = 'render'
     
