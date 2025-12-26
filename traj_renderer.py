@@ -1,13 +1,11 @@
 import numpy as np
 import sys
 import os
-import glob
 from plyfile import PlyData
 import mitsuba as mi
 
 
 class XMLTemplates:
-    # XML template for the scene (camera, sampler, surface material, etc.)
     HEAD = """
 <scene version="0.6.0">
     <integrator type="path">
@@ -37,7 +35,6 @@ class XMLTemplates:
         <rgb name="diffuseReflectance" value="1,1,1"/>
     </bsdf>
 """
-    # XML template for a single droplet (teardrop mesh) in the scene
     DROPLET_SEGMENT = """
     <shape type="obj">
         <string name="filename" value="{}"/>
@@ -49,7 +46,6 @@ class XMLTemplates:
         </bsdf>
     </shape>
 """
-    # XML template for the ground plane and the background plane
     TAIL = """
     <shape type="rectangle">
         <ref name="bsdf" id="surfaceMaterial"/>
@@ -88,41 +84,33 @@ class TrajectoryRenderer:
     @staticmethod
     def _create_droplet_mesh():
         """创建水滴形状的mesh文件（OBJ格式）"""
-        # 创建临时文件夹存储mesh文件
         temp_dir = 'temp_meshes'
         os.makedirs(temp_dir, exist_ok=True)
         mesh_path = os.path.join(temp_dir, 'droplet.obj')
         
-        # 如果文件已存在，删除它以便重新生成（确保使用最新的形状）
         if os.path.exists(mesh_path):
             os.remove(mesh_path)
         
-        # 生成水滴形状的顶点和面
-        # 水滴形状：上半部分是球体，下半部分逐渐变尖
         n_segments = 20
         n_rings = 16
-        base_radius = 0.01  # 基础半径（进一步放大）
-        length = 0.03  # 水滴总长度（进一步放大）
+        base_radius = 0.008
+        length = 0.035
         
         vertices = []
         faces = []
         
-        # 生成顶点
         for i in range(n_rings + 1):
-            theta = np.pi * i / n_rings  # 从0到π
+            theta = np.pi * i / n_rings
             for j in range(n_segments):
-                phi = 2 * np.pi * j / n_segments  # 从0到2π
+                phi = 2 * np.pi * j / n_segments
                 
-                # 水滴形状：上半部分（0到π/3）是球体，下半部分逐渐变尖
                 if theta <= np.pi / 3:
-                    r = base_radius  # 上半部分保持圆形
+                    r = base_radius
                     z_offset = 0
                 else:
-                    # 下半部分逐渐变尖，使用更陡的曲线
                     t = (theta - np.pi / 3) / (2 * np.pi / 3)
-                    # 使用二次曲线让变尖更明显
-                    r = base_radius * (1 - t) ** 2  # 从base_radius逐渐缩小到0
-                    z_offset = -length * t * 0.8  # 向下延伸
+                    r = base_radius * (1 - t) ** 2
+                    z_offset = -length * t * 0.8
                 
                 x = r * np.sin(theta) * np.cos(phi)
                 y = r * np.sin(theta) * np.sin(phi)
@@ -130,47 +118,34 @@ class TrajectoryRenderer:
                 
                 vertices.append([x, y, z])
         
-        # 生成面
         for i in range(n_rings):
             for j in range(n_segments):
                 v0 = i * n_segments + j
                 v1 = i * n_segments + (j + 1) % n_segments
                 v2 = (i + 1) * n_segments + j
                 v3 = (i + 1) * n_segments + (j + 1) % n_segments
-                
-                # 两个三角形组成一个四边形
-                faces.append([v0, v1, v2])
-                faces.append([v1, v3, v2])
+                faces.append([v0, v2, v1])
+                faces.append([v1, v2, v3])
         
-        # 写入OBJ文件（不写法线，让Mitsuba自动计算）
         with open(mesh_path, 'w') as f:
-            # 写入顶点
             for v in vertices:
                 f.write(f'v {v[0]:.6f} {v[1]:.6f} {v[2]:.6f}\n')
-            
-            # 写入面（只有顶点索引，不写法线）
             for face in faces:
-                # 格式：f v1 v2 v3（不包含法线索引）
                 f.write(f'f {face[0]+1} {face[1]+1} {face[2]+1}\n')
         
         return os.path.abspath(mesh_path)
 
     @staticmethod
-    def compute_color(x, y, z, noise_seed=0):
-        g = 0.3 
-        return np.array([g, g, g])
+    def compute_color():
+        return np.array([0.3, 0.3, 0.3])
 
     @staticmethod
     def generate_random_rotation_matrix(seed, translation):
-        """生成包含随机旋转和平移的变换矩阵（Rodrigues旋转公式）"""
         np.random.seed(seed)
-        # 随机旋转轴（归一化）
         axis = np.random.randn(3)
         axis = axis / np.linalg.norm(axis)
-        # 随机旋转角度（0到2π）
         angle = np.random.uniform(0, 2 * np.pi)
         
-        # 使用Rodrigues公式计算旋转矩阵
         cos_a = np.cos(angle)
         sin_a = np.sin(angle)
         K = np.array([
@@ -180,12 +155,9 @@ class TrajectoryRenderer:
         ])
         R = np.eye(3) + sin_a * K + (1 - cos_a) * np.dot(K, K)
         
-        # 创建4x4齐次变换矩阵：先旋转，再平移
         matrix = np.eye(4)
         matrix[:3, :3] = R
         matrix[:3, 3] = translation
-        
-        # 返回矩阵的16个元素（按行优先）
         return matrix.flatten()
 
     @staticmethod
@@ -208,23 +180,14 @@ class TrajectoryRenderer:
 
     def generate_xml_content(self, pcl):
         xml_segments = [self.XML_HEAD]
-        pcl_min = np.min(pcl, axis=0)
-        pcl_max = np.max(pcl, axis=0)
-        pcl_range = pcl_max - pcl_min
+        color = self.compute_color()
         
         for idx, point in enumerate(pcl):
-            normalized_point = (point - pcl_min) / (pcl_range + 1e-8)
-            color = self.compute_color(
-                normalized_point[0], normalized_point[1], normalized_point[2], 
-                noise_seed=idx)
-            
-            # 生成包含随机旋转和平移的变换矩阵
             transform_matrix = self.generate_random_rotation_matrix(idx, point)
-            
             xml_segments.append(self.XML_DROPLET_SEGMENT.format(
                 self.droplet_mesh_path,
-                *transform_matrix,  # 变换矩阵（16个值：旋转+平移）
-                color[0], color[1], color[2]  # 颜色
+                *transform_matrix,
+                color[0], color[1], color[2]
             ))
         xml_segments.append(self.XML_TAIL)
         return ''.join(xml_segments)
@@ -241,16 +204,13 @@ class TrajectoryRenderer:
         try:
             mi.set_variant('cuda_ad_rgb')
             print('Using CUDA GPU (cuda_ad_rgb)')
-            return True
         except:
             try:
                 mi.set_variant('cuda_rgb')
                 print('Using CUDA GPU (cuda_rgb)')
-                return True
             except:
                 mi.set_variant('scalar_rgb')
                 print('Using CPU (scalar_rgb) - GPU not available')
-                return False
 
     @staticmethod
     def render_scene(xml_file_path):
@@ -302,10 +262,9 @@ class TrajectoryRenderer:
 
     @staticmethod
     def cleanup_temp_meshes():
-        """清理临时mesh文件"""
+        import shutil
         temp_dir = 'temp_meshes'
         if os.path.exists(temp_dir):
-            import shutil
             shutil.rmtree(temp_dir)
 
 
@@ -316,7 +275,6 @@ def main(argv):
     input_folder = 'ply'
     output_folder = 'render'
     
-    # 测试单个文件
     target_files = ['pts_0.ply']
     
     os.makedirs(output_folder, exist_ok=True)
@@ -350,7 +308,6 @@ def main(argv):
             except Exception as e:
                 print(f'✗ Error processing {os.path.basename(ply_file)}: {str(e)}')
     finally:
-        # 清理临时mesh文件
         TrajectoryRenderer.cleanup_temp_meshes()
     
     print('\n' + '=' * 60)
