@@ -160,7 +160,17 @@ class PointCloudRenderer:
 
     @staticmethod
     def render_scene(xml_file_path):
-        mi.set_variant('scalar_rgb')
+        # 尝试使用CUDA GPU，如果失败则回退到CPU
+        try:
+            mi.set_variant('cuda_ad_rgb')
+            print('  Using CUDA GPU...', end=' ', flush=True)
+        except:
+            try:
+                mi.set_variant('cuda_rgb')
+                print('  Using CUDA GPU...', end=' ', flush=True)
+            except:
+                mi.set_variant('scalar_rgb')
+                print('  Using CPU (GPU not available)...', end=' ', flush=True)
         scene = mi.load_file(xml_file_path)
         img = mi.render(scene)
         return img
