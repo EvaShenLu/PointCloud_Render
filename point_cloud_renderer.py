@@ -172,7 +172,7 @@ class PointCloudRenderer:
             pcl[:, 0] *= -1
             pcl[:, 2] += 0.0125
 
-            output_filename = f'{self.filename}_{index:02d}'
+            output_filename = f'{self.filename}'
             if self.output_folder:
                 os.makedirs(self.output_folder, exist_ok=True)
                 output_file_path = os.path.join(self.output_folder, output_filename)
@@ -193,11 +193,13 @@ class PointCloudRenderer:
             print('Saving...', end=' ', flush=True)
             self.save_scene(output_file_path, rendered_scene)
             
+            if os.path.exists(xml_file_path):
+                os.remove(xml_file_path)
+            
             print('Done!')
 
 
 def main(argv):
-    # 初始化Mitsuba variant（只设置一次）
     PointCloudRenderer.init_mitsuba_variant()
     print('=' * 60)
     
