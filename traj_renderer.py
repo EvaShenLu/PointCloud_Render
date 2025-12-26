@@ -101,7 +101,7 @@ class TrajectoryRenderer:
         # 水滴形状：上半部分是球体，下半部分逐渐变尖
         n_segments = 20
         n_rings = 16
-        base_radius = 0.008  # 基础半径
+        base_radius = 0.006  # 基础半径（减小球形端）
         length = 0.02  # 水滴总长度
         
         vertices = []
