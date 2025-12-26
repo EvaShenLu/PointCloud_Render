@@ -143,7 +143,7 @@ class TrajectoryRenderer:
                 
                 normals.append(normal)
         
-        # 生成面
+        # 生成面（确保顶点顺序正确，法线指向外）
         for i in range(n_rings):
             for j in range(n_segments):
                 v0 = i * n_segments + j
@@ -151,20 +151,34 @@ class TrajectoryRenderer:
                 v2 = (i + 1) * n_segments + j
                 v3 = (i + 1) * n_segments + (j + 1) % n_segments
                 
-                # 两个三角形组成一个四边形
-                faces.append([v0, v1, v2])
-                faces.append([v1, v3, v2])
+                # 两个三角形组成一个四边形（反转顺序以确保法线指向外）
+                faces.append([v2, v1, v0])  # 反转顺序
+                faces.append([v2, v3, v1])  # 反转顺序
         
-        # 写入OBJ文件（不包含法线，让Mitsuba自动计算）
+        # 计算法线：从中心指向顶点（简单直接的方法）
+        normals = []
+        for v in vertices:
+            normal = np.array(v)
+            norm = np.linalg.norm(normal)
+            if norm > 1e-6:
+                normals.append(normal / norm)
+            else:
+                normals.append(np.array([0, 0, 1]))
+        
+        # 写入OBJ文件（包含法线）
         with open(mesh_path, 'w') as f:
             # 写入顶点
             for v in vertices:
                 f.write(f'v {v[0]:.6f} {v[1]:.6f} {v[2]:.6f}\n')
             
-            # 写入面（只使用顶点索引，让Mitsuba自动计算法线）
+            # 写入法线
+            for n in normals:
+                f.write(f'vn {n[0]:.6f} {n[1]:.6f} {n[2]:.6f}\n')
+            
+            # 写入面（包含法线索引）
             for face in faces:
-                # 格式：f v1 v2 v3（不使用法线索引）
-                f.write(f'f {face[0]+1} {face[1]+1} {face[2]+1}\n')
+                # 格式：f v1//vn1 v2//vn2 v3//vn3
+                f.write(f'f {face[0]+1}//{face[0]+1} {face[1]+1}//{face[1]+1} {face[2]+1}//{face[2]+1}\n')
         
         return os.path.abspath(mesh_path)
 
