@@ -93,37 +93,52 @@ class TrajectoryRenderer:
         os.makedirs(temp_dir, exist_ok=True)
         mesh_path = os.path.join(temp_dir, 'droplet.obj')
         
-        # 如果文件已存在，直接返回
+        # 如果文件已存在，删除它以便重新生成（确保使用最新的形状）
         if os.path.exists(mesh_path):
-            return os.path.abspath(mesh_path)
+            os.remove(mesh_path)
         
         # 生成水滴形状的顶点和面
         # 水滴形状：上半部分是球体，下半部分逐渐变尖
-        n_segments = 16
-        n_rings = 12
+        n_segments = 20
+        n_rings = 16
+        base_radius = 0.008  # 基础半径
+        length = 0.02  # 水滴总长度
         
         vertices = []
+        normals = []
         faces = []
         
-        # 生成顶点
+        # 生成顶点和法线
         for i in range(n_rings + 1):
             theta = np.pi * i / n_rings  # 从0到π
             for j in range(n_segments):
                 phi = 2 * np.pi * j / n_segments  # 从0到2π
                 
-                # 水滴形状：上半部分（0到π/2）是球体，下半部分逐渐变尖
-                if theta <= np.pi / 2:
-                    r = 0.01  # 上半部分保持圆形
+                # 水滴形状：上半部分（0到π/3）是球体，下半部分逐渐变尖
+                if theta <= np.pi / 3:
+                    r = base_radius  # 上半部分保持圆形
+                    z_offset = 0
                 else:
-                    # 下半部分逐渐变尖
-                    t = (theta - np.pi / 2) / (np.pi / 2)
-                    r = 0.01 * (1 - t * 0.7)  # 从0.01逐渐缩小到0.003
+                    # 下半部分逐渐变尖，使用更陡的曲线
+                    t = (theta - np.pi / 3) / (2 * np.pi / 3)
+                    # 使用二次曲线让变尖更明显
+                    r = base_radius * (1 - t) ** 2  # 从base_radius逐渐缩小到0
+                    z_offset = -length * t * 0.8  # 向下延伸
                 
                 x = r * np.sin(theta) * np.cos(phi)
                 y = r * np.sin(theta) * np.sin(phi)
-                z = r * np.cos(theta) - 0.003  # 向下偏移，使尖端在底部
+                z = r * np.cos(theta) + z_offset
                 
                 vertices.append([x, y, z])
+                
+                # 计算法线（从中心指向顶点）
+                if r > 1e-6:
+                    normal = np.array([x, y, z])
+                    normal = normal / np.linalg.norm(normal)
+                    normals.append(normal)
+                else:
+                    # 尖端处的法线指向下方
+                    normals.append([0, 0, -1])
         
         # 生成面
         for i in range(n_rings):
@@ -137,15 +152,20 @@ class TrajectoryRenderer:
                 faces.append([v0, v1, v2])
                 faces.append([v1, v3, v2])
         
-        # 写入OBJ文件
+        # 写入OBJ文件（包含法线）
         with open(mesh_path, 'w') as f:
             # 写入顶点
             for v in vertices:
                 f.write(f'v {v[0]:.6f} {v[1]:.6f} {v[2]:.6f}\n')
             
-            # 写入面（OBJ格式中面索引从1开始）
+            # 写入法线
+            for n in normals:
+                f.write(f'vn {n[0]:.6f} {n[1]:.6f} {n[2]:.6f}\n')
+            
+            # 写入面（包含法线索引，OBJ格式中索引从1开始）
             for face in faces:
-                f.write(f'f {face[0]+1} {face[1]+1} {face[2]+1}\n')
+                # 格式：f v1//vn1 v2//vn2 v3//vn3
+                f.write(f'f {face[0]+1}//{face[0]+1} {face[1]+1}//{face[1]+1} {face[2]+1}//{face[2]+1}\n')
         
         return os.path.abspath(mesh_path)
 
@@ -218,7 +238,7 @@ class TrajectoryRenderer:
             xml_segments.append(self.XML_DROPLET_SEGMENT.format(
                 self.droplet_mesh_path,
                 *transform_matrix,  # 变换矩阵（16个值：旋转+平移）
-                *color  # 颜色
+                color[0], color[1], color[2]  # 颜色
             ))
         xml_segments.append(self.XML_TAIL)
         return ''.join(xml_segments)
