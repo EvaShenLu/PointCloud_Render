@@ -17,9 +17,9 @@ class XMLTemplates:
         <float name="farClip" value="100"/>
         <float name="nearClip" value="0.1"/>
         <transform name="toWorld">
-            <lookat origin="3,3,3" target="0,0,0" up="0,0,1"/>
+            <lookat origin="2,2,2" target="0,0,0" up="0,0,1"/>
         </transform>
-        <float name="fov" value="25"/>
+        <float name="fov" value="30"/>
         <sampler type="independent">
             <integer name="sampleCount" value="256"/>
         </sampler>
@@ -115,19 +115,9 @@ class PointCloudRenderer:
 
     @staticmethod
     def standardize_point_cloud(pcl):
-        # 计算点云的边界
-        pcl_min = np.amin(pcl, axis=0)
-        pcl_max = np.amax(pcl, axis=0)
-        center = (pcl_min + pcl_max) / 2.0
-        # 使用每个轴的最大范围来确保点云被正确缩放
-        scale = np.max(pcl_max - pcl_min)
-        # 确保scale不为0
-        if scale < 1e-8:
-            scale = 1.0
-        # 标准化到更小的范围 [-0.4, 0.4]，确保所有点在视野内
-        # 使用0.6的缩放因子，留出更多安全边距
-        normalized = ((pcl - center) / scale * 0.6).astype(np.float32)
-        return normalized
+        center = np.mean(pcl, axis=0)
+        scale = np.amax(pcl - np.amin(pcl, axis=0))
+        return ((pcl - center) / scale).astype(np.float32)
 
 
     def load_point_cloud(self):
@@ -190,13 +180,6 @@ class PointCloudRenderer:
             pcl = pcl[:, [2, 0, 1]]
             pcl[:, 0] *= -1
             pcl[:, 2] += 0.0125
-            
-            # 验证点云范围（调试用）
-            pcl_min = np.min(pcl, axis=0)
-            pcl_max = np.max(pcl, axis=0)
-            pcl_range = np.max(pcl_max - pcl_min)
-            if pcl_range > 1.0:
-                print(f'  Warning: Point cloud range is {pcl_range:.3f}, may be outside view')
 
             output_filename = f'{self.filename}_{index:02d}'
             if self.output_folder:
