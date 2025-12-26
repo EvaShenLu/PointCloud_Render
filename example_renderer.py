@@ -206,8 +206,8 @@ def main(argv):
     input_folder = 'ply'
     output_folder = 'render'
     
-    start_idx = 0
-    end_idx = 200
+    start_idx = 201
+    end_idx = 404
     target_files = [f'pts_{i}.ply' for i in range(start_idx, end_idx + 1)]
     
     os.makedirs(output_folder, exist_ok=True)
