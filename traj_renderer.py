@@ -143,10 +143,7 @@ class TrajectoryRenderer:
                 
                 normals.append(normal)
         
-        # 生成面并计算基于面的法线
-        face_normals = {}  # 存储每个顶点的法线（累加所有相邻面的法线）
-        face_counts = {}  # 记录每个顶点被多少个面使用
-        
+        # 生成面
         for i in range(n_rings):
             for j in range(n_segments):
                 v0 = i * n_segments + j
@@ -155,67 +152,19 @@ class TrajectoryRenderer:
                 v3 = (i + 1) * n_segments + (j + 1) % n_segments
                 
                 # 两个三角形组成一个四边形
-                face1 = [v0, v1, v2]
-                face2 = [v1, v3, v2]
-                
-                # 计算每个面的法线
-                for face in [face1, face2]:
-                    p0 = np.array(vertices[face[0]])
-                    p1 = np.array(vertices[face[1]])
-                    p2 = np.array(vertices[face[2]])
-                    
-                    # 计算面的法线（叉积）
-                    edge1 = p1 - p0
-                    edge2 = p2 - p0
-                    face_normal = np.cross(edge1, edge2)
-                    norm = np.linalg.norm(face_normal)
-                    if norm > 1e-6:
-                        face_normal = face_normal / norm
-                    else:
-                        # 如果法线无效，使用顶点法线
-                        face_normal = normals[face[0]]
-                    
-                    # 累加到每个顶点的法线
-                    for v_idx in face:
-                        if v_idx not in face_normals:
-                            face_normals[v_idx] = np.zeros(3)
-                            face_counts[v_idx] = 0
-                        face_normals[v_idx] += face_normal
-                        face_counts[v_idx] += 1
-                
-                faces.append(face1)
-                faces.append(face2)
+                faces.append([v0, v1, v2])
+                faces.append([v1, v3, v2])
         
-        # 归一化每个顶点的法线（平均所有相邻面的法线）
-        for v_idx in range(len(vertices)):
-            if v_idx in face_normals and face_counts[v_idx] > 0:
-                normals[v_idx] = face_normals[v_idx] / face_counts[v_idx]
-                norm = np.linalg.norm(normals[v_idx])
-                if norm > 1e-6:
-                    normals[v_idx] = normals[v_idx] / norm
-                else:
-                    # 如果法线仍然无效，使用原始法线
-                    normal = np.array(vertices[v_idx])
-                    norm = np.linalg.norm(normal)
-                    if norm > 1e-6:
-                        normals[v_idx] = normal / norm
-                    else:
-                        normals[v_idx] = np.array([0, 0, 1])
-        
-        # 写入OBJ文件（包含法线）
+        # 写入OBJ文件（不包含法线，让Mitsuba自动计算）
         with open(mesh_path, 'w') as f:
             # 写入顶点
             for v in vertices:
                 f.write(f'v {v[0]:.6f} {v[1]:.6f} {v[2]:.6f}\n')
             
-            # 写入法线
-            for n in normals:
-                f.write(f'vn {n[0]:.6f} {n[1]:.6f} {n[2]:.6f}\n')
-            
-            # 写入面（包含法线索引，OBJ格式中索引从1开始）
+            # 写入面（只使用顶点索引，让Mitsuba自动计算法线）
             for face in faces:
-                # 格式：f v1//vn1 v2//vn2 v3//vn3
-                f.write(f'f {face[0]+1}//{face[0]+1} {face[1]+1}//{face[1]+1} {face[2]+1}//{face[2]+1}\n')
+                # 格式：f v1 v2 v3（不使用法线索引）
+                f.write(f'f {face[0]+1} {face[1]+1} {face[2]+1}\n')
         
         return os.path.abspath(mesh_path)
 
