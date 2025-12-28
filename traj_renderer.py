@@ -140,7 +140,7 @@ class TrajectoryRenderer:
 
     @staticmethod
     def generate_rotation_matrix_from_velocity(velocity, translation):
-        """根据速度向量生成旋转矩阵，使水滴指向速度方向"""
+        """根据速度向量生成旋转矩阵，使水滴尖端指向速度的反方向"""
         velocity = np.array(velocity)
         vel_norm = np.linalg.norm(velocity)
         
@@ -150,15 +150,15 @@ class TrajectoryRenderer:
             matrix[:3, 3] = translation
             return matrix.flatten()
         
-        # 归一化速度向量（水滴尖端指向速度方向）
-        vel_normalized = velocity / vel_norm
+        # 归一化速度向量，然后取反（目标方向：水滴尖端指向速度的反方向）
+        vel_normalized = -velocity / vel_norm
         
-        # 默认水滴方向是向下（0, 0, -1）
-        default_direction = np.array([0, 0, -1])
+        # 默认水滴尖端方向是向下（0, 0, -1）
+        droplet_tip_direction = np.array([0, 0, -1])
         
-        # 计算旋转轴和角度
-        dot_product = np.dot(default_direction, vel_normalized)
-        dot_product = np.clip(dot_product, -1.0, 1.0)  # 防止数值误差
+        # 计算旋转轴和角度，使尖端从默认方向旋转到速度的反方向
+        dot_product = np.dot(droplet_tip_direction, vel_normalized)
+        dot_product = np.clip(dot_product, -1.0, 1.0)
         
         if abs(dot_product - 1.0) < 1e-6:
             # 已经对齐，不需要旋转
@@ -166,12 +166,17 @@ class TrajectoryRenderer:
             matrix[:3, 3] = translation
             return matrix.flatten()
         elif abs(dot_product + 1.0) < 1e-6:
-            # 完全相反，旋转180度
-            axis = np.array([1, 0, 0])  # 任意垂直轴
+            # 完全相反（速度向上），需要旋转180度
+            # 选择一个垂直于速度向量的轴
+            if abs(vel_normalized[0]) < 0.9:
+                axis = np.cross(vel_normalized, np.array([1, 0, 0]))
+            else:
+                axis = np.cross(vel_normalized, np.array([0, 1, 0]))
+            axis = axis / np.linalg.norm(axis)
             angle = np.pi
         else:
-            # 计算旋转轴（叉积）
-            axis = np.cross(default_direction, vel_normalized)
+            # 计算旋转轴（叉积）：从默认方向到速度方向
+            axis = np.cross(droplet_tip_direction, vel_normalized)
             axis = axis / np.linalg.norm(axis)
             angle = np.arccos(dot_product)
         
@@ -232,8 +237,11 @@ class TrajectoryRenderer:
         if file_extension == '.npy':
             data = np.load(self.file_path, allow_pickle=True)
             if data.shape[1] == 6:
+                print(f'  Loaded data shape: {data.shape} (with velocity)')
+                print(f'  Sample velocity: {data[0, 3:6]}')
                 return data  # (N, 6): x, y, z, vx, vy, vz
             else:
+                print(f'  Loaded data shape: {data.shape} (position only)')
                 return data
         elif file_extension == '.npz':
             return np.load(self.file_path)['pred']
@@ -241,23 +249,51 @@ class TrajectoryRenderer:
             ply_data = PlyData.read(self.file_path)
             vertex_data = ply_data['vertex']
             
+            # 尝试直接访问属性来检查是否存在
+            has_vx = False
+            has_nx = False
+            try:
+                _ = vertex_data['vx']
+                has_vx = True
+            except (KeyError, ValueError):
+                pass
+            
+            try:
+                _ = vertex_data['nx']
+                has_nx = True
+            except (KeyError, ValueError):
+                pass
+            
             # 检查是否有速度信息（vx, vy, vz）
-            if 'vx' in vertex_data.dtype.names and 'vy' in vertex_data.dtype.names and 'vz' in vertex_data.dtype.names:
-                # 有速度信息，返回 (N, 6)
-                return np.column_stack([
-                    vertex_data['x'], vertex_data['y'], vertex_data['z'],
-                    vertex_data['vx'], vertex_data['vy'], vertex_data['vz']
-                ])
+            if has_vx:
+                try:
+                    data = np.column_stack([
+                        vertex_data['x'], vertex_data['y'], vertex_data['z'],
+                        vertex_data['vx'], vertex_data['vy'], vertex_data['vz']
+                    ])
+                    print(f'  Loaded PLY with velocity (vx,vy,vz): shape={data.shape}')
+                    print(f'  Sample velocity: {data[0, 3:6]}')
+                    return data
+                except (KeyError, ValueError):
+                    pass
+            
             # 检查是否用法线(nx, ny, nz)作为速度向量
-            elif 'nx' in vertex_data.dtype.names and 'ny' in vertex_data.dtype.names and 'nz' in vertex_data.dtype.names:
-                # 用法线作为速度向量，返回 (N, 6)
-                return np.column_stack([
-                    vertex_data['x'], vertex_data['y'], vertex_data['z'],
-                    vertex_data['nx'], vertex_data['ny'], vertex_data['nz']
-                ])
-            else:
-                # 只有位置信息，返回 (N, 3)
-                return np.column_stack([vertex_data['x'], vertex_data['y'], vertex_data['z']])
+            if has_nx:
+                try:
+                    data = np.column_stack([
+                        vertex_data['x'], vertex_data['y'], vertex_data['z'],
+                        vertex_data['nx'], vertex_data['ny'], vertex_data['nz']
+                    ])
+                    print(f'  Loaded PLY with normal as velocity (nx,ny,nz): shape={data.shape}')
+                    print(f'  Sample velocity (from normal): {data[0, 3:6]}')
+                    return data
+                except (KeyError, ValueError):
+                    pass
+            
+            # 只有位置信息，返回 (N, 3)
+            data = np.column_stack([vertex_data['x'], vertex_data['y'], vertex_data['z']])
+            print(f'  Loaded PLY position only: shape={data.shape}')
+            return data
         else:
             raise ValueError('Unsupported file format.')
 
@@ -267,6 +303,10 @@ class TrajectoryRenderer:
         
         # 检查是否有速度信息
         has_velocity = pcl.shape[1] == 6
+        if has_velocity:
+            print(f'  Using velocity for orientation: {pcl.shape[0]} points')
+        else:
+            print(f'  No velocity info, using random rotation: {pcl.shape[0]} points')
         
         for idx, point in enumerate(pcl):
             if has_velocity:
@@ -325,9 +365,21 @@ class TrajectoryRenderer:
         total_frames = len(pcl_data)
         for index, pcl in enumerate(pcl_data):
             pcl = self.standardize_point_cloud(pcl)
-            pcl = pcl[:, [2, 0, 1]]
-            pcl[:, 0] *= -1
-            pcl[:, 2] += 0.0125
+            
+            # 重新排列位置坐标，同时保留速度信息（如果有）
+            has_velocity = pcl.shape[1] == 6
+            if has_velocity:
+                # 重新排列位置坐标 [z, x, y]，速度保持不变
+                pcl_positions = pcl[:, [2, 0, 1]]
+                pcl_positions[:, 0] *= -1
+                pcl_positions[:, 2] += 0.0125
+                # 合并位置和速度
+                pcl = np.column_stack([pcl_positions, pcl[:, 3:6]])
+            else:
+                # 只有位置信息
+                pcl = pcl[:, [2, 0, 1]]
+                pcl[:, 0] *= -1
+                pcl[:, 2] += 0.0125
 
             output_filename = f'{self.filename}'
             if self.output_folder:
@@ -370,7 +422,9 @@ def main(argv):
     input_folder = 'trajectory_ply'
     output_folder = 'render'
     
-    target_files = ['frame_0199_b0.ply']
+    # 生成第10, 20, 30, 40, ... 100帧的文件名
+    frame_numbers = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+    target_files = [f'frame_{num:04d}_b0.ply' for num in frame_numbers]
     
     os.makedirs(output_folder, exist_ok=True)
     
