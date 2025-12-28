@@ -83,7 +83,6 @@ class TrajectoryRenderer:
 
     @staticmethod
     def _create_droplet_mesh():
-        """创建水滴形状的mesh文件（OBJ格式）"""
         temp_dir = 'temp_meshes'
         os.makedirs(temp_dir, exist_ok=True)
         mesh_path = os.path.join(temp_dir, 'droplet.obj')
@@ -140,7 +139,60 @@ class TrajectoryRenderer:
         return np.array([0.3, 0.3, 0.3])
 
     @staticmethod
+    def generate_rotation_matrix_from_velocity(velocity, translation):
+        """根据速度向量生成旋转矩阵，使水滴指向速度方向"""
+        velocity = np.array(velocity)
+        vel_norm = np.linalg.norm(velocity)
+        
+        if vel_norm < 1e-6:
+            # 如果速度为零，使用单位矩阵（不旋转）
+            matrix = np.eye(4)
+            matrix[:3, 3] = translation
+            return matrix.flatten()
+        
+        # 归一化速度向量（水滴尖端指向速度方向）
+        vel_normalized = velocity / vel_norm
+        
+        # 默认水滴方向是向下（0, 0, -1）
+        default_direction = np.array([0, 0, -1])
+        
+        # 计算旋转轴和角度
+        dot_product = np.dot(default_direction, vel_normalized)
+        dot_product = np.clip(dot_product, -1.0, 1.0)  # 防止数值误差
+        
+        if abs(dot_product - 1.0) < 1e-6:
+            # 已经对齐，不需要旋转
+            matrix = np.eye(4)
+            matrix[:3, 3] = translation
+            return matrix.flatten()
+        elif abs(dot_product + 1.0) < 1e-6:
+            # 完全相反，旋转180度
+            axis = np.array([1, 0, 0])  # 任意垂直轴
+            angle = np.pi
+        else:
+            # 计算旋转轴（叉积）
+            axis = np.cross(default_direction, vel_normalized)
+            axis = axis / np.linalg.norm(axis)
+            angle = np.arccos(dot_product)
+        
+        # 使用Rodrigues公式计算旋转矩阵
+        cos_a = np.cos(angle)
+        sin_a = np.sin(angle)
+        K = np.array([
+            [0, -axis[2], axis[1]],
+            [axis[2], 0, -axis[0]],
+            [-axis[1], axis[0], 0]
+        ])
+        R = np.eye(3) + sin_a * K + (1 - cos_a) * np.dot(K, K)
+        
+        matrix = np.eye(4)
+        matrix[:3, :3] = R
+        matrix[:3, 3] = translation
+        return matrix.flatten()
+
+    @staticmethod
     def generate_random_rotation_matrix(seed, translation):
+        """生成随机旋转矩阵（用于向后兼容，当没有速度信息时）"""
         np.random.seed(seed)
         axis = np.random.randn(3)
         axis = axis / np.linalg.norm(axis)
@@ -162,19 +214,50 @@ class TrajectoryRenderer:
 
     @staticmethod
     def standardize_point_cloud(pcl):
-        center = np.mean(pcl, axis=0)
-        scale = np.amax(pcl - np.amin(pcl, axis=0))
-        return ((pcl - center) / scale).astype(np.float32)
+        # 只标准化位置信息（前3列），保留速度信息
+        positions = pcl[:, :3]
+        center = np.mean(positions, axis=0)
+        scale = np.amax(positions - np.amin(positions, axis=0))
+        normalized_positions = ((positions - center) / scale).astype(np.float32)
+        
+        if pcl.shape[1] == 6:
+            # 有速度信息，合并位置和速度
+            velocities = pcl[:, 3:6].astype(np.float32)
+            return np.column_stack([normalized_positions, velocities])
+        else:
+            return normalized_positions
 
     def load_point_cloud(self):
         file_extension = os.path.splitext(self.file_path)[1]
         if file_extension == '.npy':
-            return np.load(self.file_path, allow_pickle=True)
+            data = np.load(self.file_path, allow_pickle=True)
+            if data.shape[1] == 6:
+                return data  # (N, 6): x, y, z, vx, vy, vz
+            else:
+                return data
         elif file_extension == '.npz':
             return np.load(self.file_path)['pred']
         elif file_extension == '.ply':
             ply_data = PlyData.read(self.file_path)
-            return np.column_stack([ply_data['vertex'][t] for t in ('x', 'y', 'z')])
+            vertex_data = ply_data['vertex']
+            
+            # 检查是否有速度信息（vx, vy, vz）
+            if 'vx' in vertex_data.dtype.names and 'vy' in vertex_data.dtype.names and 'vz' in vertex_data.dtype.names:
+                # 有速度信息，返回 (N, 6)
+                return np.column_stack([
+                    vertex_data['x'], vertex_data['y'], vertex_data['z'],
+                    vertex_data['vx'], vertex_data['vy'], vertex_data['vz']
+                ])
+            # 检查是否用法线(nx, ny, nz)作为速度向量
+            elif 'nx' in vertex_data.dtype.names and 'ny' in vertex_data.dtype.names and 'nz' in vertex_data.dtype.names:
+                # 用法线作为速度向量，返回 (N, 6)
+                return np.column_stack([
+                    vertex_data['x'], vertex_data['y'], vertex_data['z'],
+                    vertex_data['nx'], vertex_data['ny'], vertex_data['nz']
+                ])
+            else:
+                # 只有位置信息，返回 (N, 3)
+                return np.column_stack([vertex_data['x'], vertex_data['y'], vertex_data['z']])
         else:
             raise ValueError('Unsupported file format.')
 
@@ -182,8 +265,20 @@ class TrajectoryRenderer:
         xml_segments = [self.XML_HEAD]
         color = self.compute_color()
         
+        # 检查是否有速度信息
+        has_velocity = pcl.shape[1] == 6
+        
         for idx, point in enumerate(pcl):
-            transform_matrix = self.generate_random_rotation_matrix(idx, point)
+            if has_velocity:
+                # 有速度信息：位置和速度
+                position = point[:3]
+                velocity = point[3:6]
+                transform_matrix = self.generate_rotation_matrix_from_velocity(velocity, position)
+            else:
+                # 没有速度信息：使用随机旋转（向后兼容）
+                position = point[:3]
+                transform_matrix = self.generate_random_rotation_matrix(idx, position)
+            
             xml_segments.append(self.XML_DROPLET_SEGMENT.format(
                 self.droplet_mesh_path,
                 *transform_matrix,
