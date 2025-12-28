@@ -367,10 +367,10 @@ def main(argv):
     TrajectoryRenderer.init_mitsuba_variant()
     print('=' * 60)
     
-    input_folder = 'ply'
+    input_folder = 'trajectory_ply'
     output_folder = 'render'
     
-    target_files = ['pts_0.ply']
+    target_files = ['frame_0199_b0.ply']
     
     os.makedirs(output_folder, exist_ok=True)
     
