@@ -203,12 +203,12 @@ def main(argv):
     PointCloudRenderer.init_mitsuba_variant()
     print('=' * 60)
     
-    input_folder = 'ply'
+    input_folder = 'val_ply_airplane_pcd'
     output_folder = 'render'
     
     start_idx = 0
     end_idx = 404
-    target_files = [f'pts_{i}.ply' for i in range(start_idx, end_idx + 1)]
+    target_files = [f'{i:06d}.ply' for i in range(start_idx, end_idx + 1)]
     
     os.makedirs(output_folder, exist_ok=True)
     

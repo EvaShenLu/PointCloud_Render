@@ -1,16 +1,14 @@
 import numpy as np
-import sys
 import os
 from plyfile import PlyData
 import mitsuba as mi
-
 
 
 class XMLTemplates:
     HEAD = """
 <scene version="0.6.0">
     <integrator type="path">
-        <integer name="maxDepth" value="4"/>
+        <integer name="maxDepth" value="-1"/>
     </integrator>
     <sensor type="perspective">
         <float name="farClip" value="100"/>
@@ -20,12 +18,12 @@ class XMLTemplates:
         </transform>
         <float name="fov" value="36"/>
         <sampler type="independent">
-            <integer name="sampleCount" value="32"/>
+            <integer name="sampleCount" value="128"/>
         </sampler>
         <film type="hdrfilm">
-            <integer name="width" value="1280"/>
-            <integer name="height" value="720"/>
-            <rfilter type="box"/>
+            <integer name="width" value="1920"/>
+            <integer name="height" value="1080"/>
+            <rfilter type="gaussian"/>
         </film>
     </sensor>
 
@@ -48,10 +46,8 @@ class XMLTemplates:
     </shape>
 """
     TRAIL_SEGMENT = """
-    <shape type="cylinder">
-        <transform name="toWorld">
-            <matrix value="{} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}"/>
-        </transform>
+    <shape type="linearcurve">
+        <string name="filename" value="{}"/>
         <bsdf type="roughplastic">
             <rgb name="diffuseReflectance" value="{},{},{}"/>
             <rgb name="specularReflectance" value="{},{},{}"/>
@@ -81,7 +77,7 @@ class XMLTemplates:
 """
 
 
-class TrajectoryRenderer:
+class TrajectoryVelRenderer:
     XML_HEAD = XMLTemplates.HEAD
     XML_DROPLET_SEGMENT = XMLTemplates.DROPLET_SEGMENT
     XML_TRAIL_SEGMENT = XMLTemplates.TRAIL_SEGMENT
@@ -94,6 +90,7 @@ class TrajectoryRenderer:
         self.filename, _ = os.path.splitext(full_filename)
         self.output_folder = output_folder
         self.droplet_mesh_path = droplet_mesh_path or self._create_droplet_mesh()
+        self.curve_files = []
 
     @staticmethod
     def _create_droplet_mesh():
@@ -164,7 +161,7 @@ class TrajectoryRenderer:
             return matrix.flatten()
         
         target_direction = velocity / vel_norm
-        default_direction = np.array([0.0, 0.0, -1.0], dtype=np.float64)  # 水滴默认朝向
+        default_direction = np.array([0.0, 0.0, -1.0], dtype=np.float64)
         
         dot_product = np.clip(np.dot(default_direction, target_direction), -1.0, 1.0)
         axis = np.cross(default_direction, target_direction)
@@ -176,7 +173,6 @@ class TrajectoryRenderer:
                 matrix[:3, 3] = translation
                 return matrix.flatten()
             else:
-                # 完全相反，旋转180度
                 temp = np.array([1.0, 0.0, 0.0]) if abs(target_direction[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
                 axis = np.cross(target_direction, temp)
                 axis_norm = np.linalg.norm(axis)
@@ -184,10 +180,8 @@ class TrajectoryRenderer:
                 angle = np.pi
         else:
             axis = axis / axis_norm
-            # 使用arccos，但已经clip到[-1,1]范围，数值稳定
             angle = np.arccos(dot_product)
         
-        # Rodrigues公式
         cos_a, sin_a = np.cos(angle), np.sin(angle)
         K = np.array([[0, -axis[2], axis[1]], [axis[2], 0, -axis[0]], [-axis[1], axis[0], 0]], dtype=np.float64)
         R = np.eye(3, dtype=np.float64) + sin_a * K + (1 - cos_a) * np.dot(K, K)
@@ -196,136 +190,102 @@ class TrajectoryRenderer:
         matrix[:3, :3] = R
         matrix[:3, 3] = translation
         return matrix.flatten()
-    
-    def _add_trail_lines(self, xml_segments, position, velocity, frame_index=0, total_frames=200, last_motion_frame=199):
-        """为每个点添加尾迹线，根据速度方向绘制"""
-        # 确保 position 和 velocity 都是 (3,) 形状
-        position = np.asarray(position)
-        velocity = np.asarray(velocity)
-        if position.shape[0] > 3:
-            position = position[:3]
-        if velocity.shape[0] > 3:
-            velocity = velocity[:3]
-        position = position.flatten()[:3]
-        velocity = velocity.flatten()[:3]
+
+    def _add_velocity_trail(self, xml_segments, position, velocity, point_index=0, frame_index=0):
+        """根据速度向量生成尾迹线
         
+        Args:
+            xml_segments: XML片段列表
+            position: 当前点位置
+            velocity: 当前点速度向量
+            point_index: 点的索引
+            frame_index: 当前帧索引
+        """
+        velocity = np.array(velocity, dtype=np.float64)
         vel_norm = np.linalg.norm(velocity)
+        
+        # 如果速度太小，不添加尾迹
         if vel_norm < 1e-6:
             return
         
-        # 阶段定义
-        # 阶段1 (0帧): 无尾迹
-        # 阶段2 (1-20帧): 尾迹逐渐出现并变长
-        # 阶段3 (20-199帧): 尾迹保持固定长度
-        # 阶段4 (199-总帧数): 尾迹逐渐缩短直至消失
+        # 根据帧索引计算尾迹长度缩放因子
+        last_motion_frame = 199
+        fade_frames = 20
         
-        trail_growth_frames = 20
-        
-        if frame_index == 0:
-            return  # 第0帧：无尾迹
-        
-        # 确定尾迹长度和颜色
-        if frame_index <= trail_growth_frames:
-            # 阶段2：尾迹逐渐出现并变长（第1-20帧）
-            phase_progress = (frame_index - 1) / (trail_growth_frames - 1)  # 0到1
-            trail_length = 0.04 * phase_progress
-            trail_color = np.array([0.2, 1.0, 0.4])  # 参考traj2_renderer.py的颜色
+        if frame_index <= 19:
+            # 0-19帧：尾迹渐渐出现变长（从0到1）
+            length_scale = frame_index / 19.0
         elif frame_index <= last_motion_frame:
-            # 阶段3：尾迹保持固定长度（第20-199帧）
-            trail_length = 0.04
-            trail_color = np.array([0.2, 1.0, 0.4])  # 亮绿色
+            # 20-199帧：尾迹长度不变（保持最长长度）
+            length_scale = 1.0
         else:
-            # 阶段4：尾迹逐渐缩短直至消失（第199帧之后）
-            fade_frames = total_frames - last_motion_frame
-            phase_progress = (frame_index - last_motion_frame) / fade_frames  # 0到1
-            trail_length = 0.04 * (1.0 - phase_progress)
-            # 颜色也逐渐变暗
-            trail_color_bright = np.array([0.2, 1.0, 0.4])
-            trail_color_dim = np.array([0.1, 0.5, 0.2])
-            trail_color = trail_color_bright * (1.0 - phase_progress) + trail_color_dim * phase_progress
+            # 200-219帧：尾迹渐渐缩短消失（从1到0）
+            fade_progress = (frame_index - last_motion_frame) / fade_frames
+            length_scale = 1.0 - fade_progress
         
-        # 如果长度为0，不添加尾迹
-        if trail_length < 1e-6:
+        # 如果缩放因子为0或负数，不添加尾迹
+        if length_scale <= 0:
             return
         
-        # 计算水滴尖端位置
-        droplet_length = 0.035
-        droplet_tip_offset = droplet_length * 0.4
-        droplet_tip = position + (velocity / vel_norm) * droplet_tip_offset
+        # 根据速度大小确定尾迹长度
+        # 速度越大，尾迹越长
+        base_trail_length = 0.07
+        max_trail_length = 0.3
+        vel_normalized = min(vel_norm / 10.0, 1.0)  # 归一化速度（假设最大速度约为10）
+        trail_length = (base_trail_length + (max_trail_length - base_trail_length) * vel_normalized) * length_scale
         
-        # 尾迹方向（速度的反方向）
-        trail_direction = -velocity / vel_norm
+        # 速度方向（反方向，因为水滴朝向速度反方向）
+        vel_direction = -velocity / vel_norm
         
-        # 计算尾迹起点和终点
-        start_pos = droplet_tip
-        end_pos = droplet_tip + trail_direction * trail_length
-        segment_center = (start_pos + end_pos) / 2
+        # 生成尾迹点：从远端到当前位置
+        n_trail_points = 20
+        trail_points = []
+        for i in range(n_trail_points):
+            t = (n_trail_points - 1 - i) / (n_trail_points - 1)  # 反转t: 1 -> 0
+            trail_point = position + vel_direction * trail_length * t
+            trail_points.append(trail_point)
         
-        # 计算旋转矩阵，使圆柱体沿着trail_direction方向
-        z_axis = np.array([0.0, 0.0, 1.0])
-        dot = np.clip(np.dot(z_axis, trail_direction), -1.0, 1.0)
+        # 现在trail_points[0]是尾迹远端,trail_points[-1]接近position
+        # 添加position作为最后一个点,确保完全连接
+        trail_points.append(position)
         
-        if abs(dot - 1.0) < 1e-6:
-            R = np.eye(3)
-        elif abs(dot + 1.0) < 1e-6:
-            temp = np.array([1.0, 0.0, 0.0]) if abs(trail_direction[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
-            axis = np.cross(trail_direction, temp)
-            axis = axis / np.linalg.norm(axis)
-            cos_a, sin_a = np.cos(np.pi), np.sin(np.pi)
-            K = np.array([[0, -axis[2], axis[1]], [axis[2], 0, -axis[0]], [-axis[1], axis[0], 0]])
-            R = np.eye(3) + sin_a * K + (1 - cos_a) * np.dot(K, K)
-        else:
-            axis = np.cross(z_axis, trail_direction)
-            axis = axis / np.linalg.norm(axis)
-            angle = np.arccos(dot)
-            cos_a, sin_a = np.cos(angle), np.sin(angle)
-            K = np.array([[0, -axis[2], axis[1]], [axis[2], 0, -axis[0]], [-axis[1], axis[0], 0]])
-            R = np.eye(3) + sin_a * K + (1 - cos_a) * np.dot(K, K)
+        # 创建临时曲线文件
+        temp_curves_dir = 'temp_curves'
+        os.makedirs(temp_curves_dir, exist_ok=True)
+        curve_filename = f'trail_{point_index}_{id(self)}.txt'
+        curve_filepath = os.path.join(temp_curves_dir, curve_filename)
+        self.curve_files.append(curve_filepath)
         
+        # 细线半径
         radius = 0.0007
-        scale_matrix = np.eye(4, dtype=np.float64)
-        scale_matrix[0, 0] = scale_matrix[1, 1] = radius
-        scale_matrix[2, 2] = trail_length
         
-        rot_matrix = np.eye(4, dtype=np.float64)
-        rot_matrix[:3, :3] = R
+        # 验证点是否有效
+        valid_points = []
+        for point in trail_points:
+            point = np.asarray(point)
+            if len(point.shape) == 1 and point.shape[0] == 3:
+                if np.all(np.isfinite(point)) and not np.any(np.isnan(point)):
+                    valid_points.append(point)
         
-        trans_matrix = np.eye(4, dtype=np.float64)
-        trans_matrix[:3, 3] = segment_center
+        if len(valid_points) < 2:
+            return
         
-        transform_matrix = trans_matrix @ rot_matrix @ scale_matrix
+        # 写入曲线文件（Mitsuba格式：每行 x y z radius）
+        with open(curve_filepath, 'w') as f:
+            for point in valid_points:
+                f.write(f'{point[0]:.6f} {point[1]:.6f} {point[2]:.6f} {radius:.6f}\n')
         
-        # 参考traj2_renderer.py，使用roughplastic材质，增强specularReflectance
+        # 尾迹颜色和材质（保持不变）
+        trail_color = np.array([0.2, 1.0, 0.4])
+        abs_curve_path = os.path.abspath(curve_filepath).replace('\\', '/')
         specular_color = trail_color * 1.5
         specular_color = np.clip(specular_color, 0.0, 1.0)
         
         xml_segments.append(self.XML_TRAIL_SEGMENT.format(
-            *transform_matrix.flatten(),
-            trail_color[0], trail_color[1], trail_color[2],  # diffuseReflectance
-            specular_color[0], specular_color[1], specular_color[2]  # specularReflectance
+            abs_curve_path,
+            trail_color[0], trail_color[1], trail_color[2],
+            specular_color[0], specular_color[1], specular_color[2]
         ))
-
-    @staticmethod
-    def generate_random_rotation_matrix(seed, translation):
-        """生成随机旋转矩阵（用于向后兼容，当没有速度信息时）"""
-        np.random.seed(seed)
-        axis = np.random.randn(3)
-        axis = axis / np.linalg.norm(axis)
-        angle = np.random.uniform(0, 2 * np.pi)
-        
-        cos_a = np.cos(angle)
-        sin_a = np.sin(angle)
-        K = np.array([
-            [0, -axis[2], axis[1]],
-            [axis[2], 0, -axis[0]],
-            [-axis[1], axis[0], 0]
-        ])
-        R = np.eye(3) + sin_a * K + (1 - cos_a) * np.dot(K, K)
-        
-        matrix = np.eye(4)
-        matrix[:3, :3] = R
-        matrix[:3, 3] = translation
-        return matrix.flatten()
 
     @staticmethod
     def standardize_point_cloud(pcl):
@@ -366,8 +326,7 @@ class TrajectoryRenderer:
             data = np.load(self.file_path, allow_pickle=True)
             if data.shape[1] == 6:
                 print(f'  Loaded data shape: {data.shape} (with velocity)')
-                print(f'  Sample velocity: {data[0, 3:6]}')
-                return data  # (N, 6): x, y, z, vx, vy, vz
+                return data
             else:
                 print(f'  Loaded data shape: {data.shape} (position only)')
                 return data
@@ -377,7 +336,6 @@ class TrajectoryRenderer:
             ply_data = PlyData.read(self.file_path)
             vertex_data = ply_data['vertex']
             
-            # 尝试直接访问属性来检查是否存在
             has_vx = False
             has_nx = False
             try:
@@ -392,7 +350,6 @@ class TrajectoryRenderer:
             except (KeyError, ValueError):
                 pass
             
-            # 检查是否有速度信息（vx, vy, vz）
             if has_vx:
                 try:
                     data = np.column_stack([
@@ -400,26 +357,21 @@ class TrajectoryRenderer:
                         vertex_data['vx'], vertex_data['vy'], vertex_data['vz']
                     ])
                     print(f'  Loaded PLY with velocity (vx,vy,vz): shape={data.shape}')
-                    print(f'  Sample velocity: {data[0, 3:6]}')
                     return data
                 except (KeyError, ValueError):
                     pass
             
-            # 检查是否用法线(nx, ny, nz)作为速度向量（取反，使水滴朝向飞机内侧）
             if has_nx:
                 try:
-                    # 法线取反，使水滴朝向飞机内侧
                     data = np.column_stack([
                         vertex_data['x'], vertex_data['y'], vertex_data['z'],
                         vertex_data['nx'], vertex_data['ny'], vertex_data['nz']
                     ])
-                    print(f'  Loaded PLY with normal as velocity (nx,ny,nz, inverted): shape={data.shape}')
-                    print(f'  Sample velocity (from -normal): {data[0, 3:6]}')
+                    print(f'  Loaded PLY with normal as velocity (nx,ny,nz): shape={data.shape}')
                     return data
                 except (KeyError, ValueError):
                     pass
             
-            # 只有位置信息，返回 (N, 3)
             data = np.column_stack([vertex_data['x'], vertex_data['y'], vertex_data['z']])
             print(f'  Loaded PLY position only: shape={data.shape}')
             return data
@@ -427,12 +379,31 @@ class TrajectoryRenderer:
             raise ValueError('Unsupported file format.')
 
     @staticmethod
-    def compute_camera_position(frame_index, total_frames=200):
-        """根据帧数计算相机位置（从远到近）"""
-        progress = frame_index / max(total_frames - 1, 1)
-        origin_x = 2.8 - 1.0 * progress
-        origin_y = 2.8 - 1.0 * progress
-        origin_z = 3.0 - 0.8 * progress
+    def compute_camera_position(frame_index, total_frames=220):
+        """根据帧数计算相机位置
+        0-199帧：从(2.8, 2.8, 3.0)拉近到(2, 2, 2)
+        200-219帧：从(2, 2, 2)拉近到(1.8, 1.8, 1.8)
+        """
+        last_motion_frame = 199
+        fade_frames = 20
+        
+        if frame_index <= last_motion_frame:
+            # 0-199帧：从起始位置到(2, 2, 2)
+            start_pos = (2.8, 2.8, 3.0)
+            end_pos = (1.8, 1.8, 1.8)
+            progress = frame_index / max(last_motion_frame, 1)
+            origin_x = start_pos[0] + (end_pos[0] - start_pos[0]) * progress
+            origin_y = start_pos[1] + (end_pos[1] - start_pos[1]) * progress
+            origin_z = start_pos[2] + (end_pos[2] - start_pos[2]) * progress
+        else:
+            # 200-219帧：从(2, 2, 2)到(1.8, 1.8, 1.8)
+            start_pos = (1.8, 1.8, 1.8)
+            end_pos = (1.6, 1.6, 1.6)
+            fade_progress = (frame_index - last_motion_frame) / max(fade_frames, 1)
+            origin_x = start_pos[0] + (end_pos[0] - start_pos[0]) * fade_progress
+            origin_y = start_pos[1] + (end_pos[1] - start_pos[1]) * fade_progress
+            origin_z = start_pos[2] + (end_pos[2] - start_pos[2]) * fade_progress
+        
         return origin_x, origin_y, origin_z
 
     def generate_xml_content(self, pcl, frame_index=0, total_frames=220):
@@ -440,32 +411,30 @@ class TrajectoryRenderer:
         xml_segments = [self.XML_HEAD.format(origin_x, origin_y, origin_z)]
         color = self.compute_color()
         
-        # 检查是否有速度信息
         has_velocity = pcl.shape[1] == 6
-        if has_velocity:
-            print(f'  Using velocity for orientation: {pcl.shape[0]} points')
-        else:
-            print(f'  No velocity info, using random rotation: {pcl.shape[0]} points')
+        if not has_velocity:
+            print('  Warning: No velocity info, trails will not be rendered')
         
         for idx, point in enumerate(pcl):
+            position = point[:3]
+            
             if has_velocity:
-                # 有速度信息：位置和速度
-                position = point[:3]
                 velocity = point[3:6]
                 transform_matrix = self.generate_rotation_matrix_from_velocity(velocity, position)
-                
-                # 添加尾迹线（根据速度方向）
-                self._add_trail_lines(xml_segments, position, velocity, frame_index, total_frames, last_motion_frame=199)
+                # 根据速度添加尾迹
+                self._add_velocity_trail(xml_segments, position, velocity, point_index=idx, frame_index=frame_index)
             else:
-                # 没有速度信息：使用随机旋转（向后兼容）
-                position = point[:3]
-                transform_matrix = self.generate_random_rotation_matrix(idx, position)
+                # 没有速度信息，使用单位矩阵
+                matrix = np.eye(4, dtype=np.float64)
+                matrix[:3, 3] = position
+                transform_matrix = matrix.flatten()
             
             xml_segments.append(self.XML_DROPLET_SEGMENT.format(
                 self.droplet_mesh_path,
                 *transform_matrix,
                 color[0], color[1], color[2]
             ))
+        
         xml_segments.append(self.XML_TAIL)
         return ''.join(xml_segments)
 
@@ -499,36 +468,18 @@ class TrajectoryRenderer:
     def save_scene(output_file_path, rendered_scene):
         mi.util.write_bitmap(f'{output_file_path}.png', rendered_scene)
 
-    @staticmethod
-    def extract_frame_index(filename):
-        """从文件名提取帧数"""
-        try:
-            if 'frame_' in filename:
-                frame_str = filename.split('_')[1]
-                return int(frame_str)
-        except (ValueError, IndexError):
-            pass
-        return 0
-
-    def process(self, frame_index):
-        """处理单帧点云：标准化、坐标变换、渲染
+    def process(self, frame_index=0, total_frames=220):
+        """处理单帧点云：标准化、坐标变换、渲染"""
+        self.curve_files = []
         
-        Args:
-            frame_index: 当前帧索引
-        """
         pcl = self.load_point_cloud()
         if len(pcl.shape) == 3:
-            pcl = pcl[0]  # 如果有多帧，只取第一帧
+            pcl = pcl[0]
         
         pcl = self.standardize_point_cloud(pcl)
         pcl = self.transform_coordinates(pcl)
         
-        # 根据实际帧数生成输出文件名，避免199帧之后的帧覆盖第199帧
-        if frame_index > 199:
-            # 199帧之后，使用实际帧数作为文件名
-            output_filename = f'frame_{frame_index:04d}_b0'
-        else:
-            output_filename = f'{self.filename}'
+        output_filename = f'frame_{frame_index:04d}_b0' if frame_index > 199 else self.filename
         
         if self.output_folder:
             os.makedirs(self.output_folder, exist_ok=True)
@@ -537,7 +488,7 @@ class TrajectoryRenderer:
             output_file_path = os.path.join(self.folder, output_filename)
         
         print('  Generating XML...', end=' ', flush=True)
-        xml_content = self.generate_xml_content(pcl, frame_index=frame_index, total_frames=220)
+        xml_content = self.generate_xml_content(pcl, frame_index=frame_index, total_frames=total_frames)
         xml_file_path = self.save_xml_content_to_file(output_file_path, xml_content)
         
         print('Rendering...', end=' ', flush=True)
@@ -549,6 +500,7 @@ class TrajectoryRenderer:
         if os.path.exists(xml_file_path):
             os.remove(xml_file_path)
         
+        self.cleanup_temp_curves()
         print('Done!')
 
     @staticmethod
@@ -557,28 +509,46 @@ class TrajectoryRenderer:
         temp_dir = 'temp_meshes'
         if os.path.exists(temp_dir):
             shutil.rmtree(temp_dir)
+    
+    def cleanup_temp_curves(self):
+        """清理临时曲线文件"""
+        for curve_file in self.curve_files:
+            try:
+                if os.path.exists(curve_file):
+                    os.remove(curve_file)
+            except:
+                pass
+        self.curve_files = []
+    
+    @staticmethod
+    def cleanup_temp_curves_dir():
+        """清理临时曲线目录"""
+        import shutil
+        temp_dir = 'temp_curves'
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
 
 
-def main(argv):
-    TrajectoryRenderer.init_mitsuba_variant()
+def main():
+    TrajectoryVelRenderer.init_mitsuba_variant()
     print('=' * 60)
     
     input_folder = 'trajectory_ply'
     output_folder = 'render'
     
-    # 渲染完整200帧（0-199）+ 20帧停止阶段 = 220帧
-    # 但输入文件只有0-199帧，199帧之后使用最后一帧的数据
     last_motion_frame = 199
-    fade_frames = 20  # 停止后消失的帧数
-    total_frames = last_motion_frame + fade_frames + 1  # 220帧
+    fade_frames = 20
+    total_frames = last_motion_frame + fade_frames + 1
     
-    frame_numbers = list(range(0, total_frames))  # 0, 1, 2, ..., 219
+    # 渲染全部帧（0-219）
+    start_frame = 0
+    end_frame = 219
+    frame_numbers = list(range(start_frame, end_frame + 1))
     target_files = []
     for num in frame_numbers:
         if num <= last_motion_frame:
             target_files.append(f'frame_{num:04d}_b0.ply')
         else:
-            # 199帧之后使用第199帧的数据（水滴停止）
             target_files.append(f'frame_0199_b0.ply')
     
     os.makedirs(output_folder, exist_ok=True)
@@ -593,7 +563,6 @@ def main(argv):
     
     if not ply_files:
         print(f'No target files found in folder: {input_folder}')
-        print(f'Looking for: {target_files}')
         return
     
     total_files = len(ply_files)
@@ -602,28 +571,19 @@ def main(argv):
     print('=' * 60)
     
     try:
-        # 使用共享的renderer实例（只需要一个，因为mesh是共享的）
-        shared_renderer = TrajectoryRenderer(ply_files[0], output_folder=output_folder)
-        
-        for idx, ply_file in enumerate(ply_files, 1):
-            print(f'\n[{idx}/{total_files}] ({idx*100//total_files}%) Processing: {os.path.basename(ply_file)}')
+        for idx, ply_file in enumerate(ply_files):
+            print(f'\n[{idx+1}/{total_files}] ({(idx+1)*100//total_files}%) Processing: {os.path.basename(ply_file)}')
             print('-' * 60)
             try:
-                actual_frame_index = idx - 1  # 从0开始
-                
-                # 更新renderer的文件路径（用于输出文件名）
-                shared_renderer.file_path = ply_file
-                shared_renderer.folder, full_filename = os.path.split(ply_file)
-                shared_renderer.folder = shared_renderer.folder or '.'
-                shared_renderer.filename, _ = os.path.splitext(full_filename)
-                
-                # 处理当前帧
-                shared_renderer.process(actual_frame_index)
+                frame_index = frame_numbers[idx]  # 使用实际的帧号
+                renderer = TrajectoryVelRenderer(ply_file, output_folder=output_folder)
+                renderer.process(frame_index, total_frames)
                 print(f'✓ Successfully processed: {os.path.basename(ply_file)}')
             except Exception as e:
                 print(f'✗ Error processing {os.path.basename(ply_file)}: {str(e)}')
     finally:
-        TrajectoryRenderer.cleanup_temp_meshes()
+        TrajectoryVelRenderer.cleanup_temp_meshes()
+        TrajectoryVelRenderer.cleanup_temp_curves_dir()
     
     print('\n' + '=' * 60)
     print(f'Batch processing completed! Processed {total_files} files.')
@@ -631,5 +591,5 @@ def main(argv):
 
 
 if __name__ == '__main__':
-    main(sys.argv)
+    main()
 

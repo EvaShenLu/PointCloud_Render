@@ -520,9 +520,10 @@ class TrajectoryRenderer:
     def compute_camera_position(frame_index, total_frames=200):
         """根据帧数计算相机位置（从远到近）"""
         progress = frame_index / max(total_frames - 1, 1)
-        origin_x = 2.8 - 1.0 * progress
-        origin_y = 2.8 - 1.0 * progress
-        origin_z = 3.0 - 0.8 * progress
+        # 增加拉近程度：从2.8拉近到0.8（移动2.0单位），高度从3.0拉近到1.0（移动2.0单位）
+        origin_x = 2.8 - 2.0 * progress
+        origin_y = 2.8 - 2.0 * progress
+        origin_z = 3.0 - 2.0 * progress
         return origin_x, origin_y, origin_z
 
     def generate_xml_content(self, pcl, frame_index=0, total_frames=220, history_pcls=None):
