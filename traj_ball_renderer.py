@@ -119,13 +119,9 @@ class TrajectoryBallRenderer:
         if frame_index <= 19:
             # 0-19帧：尾迹渐渐出现变长（从0到1）
             length_scale = frame_index / 19.0
-        elif frame_index <= last_motion_frame:
-            # 20-199帧：尾迹长度不变（保持最长长度）
-            length_scale = 1.0
         else:
-            # 200-219帧：尾迹渐渐缩短消失（从1到0）
-            fade_progress = (frame_index - last_motion_frame) / fade_frames
-            length_scale = 1.0 - fade_progress
+            # 20-219帧：尾迹长度不变（保持最长长度，包括200-219帧也保持第199帧的状态）
+            length_scale = 1.0
         
         # 如果缩放因子为0或负数，不添加尾迹
         if length_scale <= 0:
