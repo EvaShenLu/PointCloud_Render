@@ -208,7 +208,7 @@ def main(argv):
     
     start_idx = 0
     end_idx = 661
-    target_files = [f'ply_{i}.ply' for i in range(start_idx, end_idx + 1)]
+    target_files = [f'pts_{i}.ply' for i in range(start_idx, end_idx + 1)]
     
     os.makedirs(output_folder, exist_ok=True)
     
