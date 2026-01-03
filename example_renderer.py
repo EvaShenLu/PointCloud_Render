@@ -17,7 +17,7 @@ class XMLTemplates:
         <float name="farClip" value="100"/>
         <float name="nearClip" value="0.1"/>
         <transform name="toWorld">
-            <lookat origin="2,2,2" target="0,0,0" up="0,0,1"/>
+            <lookat origin="1.5,1.5,3.5" target="0,0,0" up="0,0,1"/>
         </transform>
         <float name="fov" value="30"/>
         <sampler type="independent">
@@ -203,12 +203,12 @@ def main(argv):
     PointCloudRenderer.init_mitsuba_variant()
     print('=' * 60)
     
-    input_folder = 'val_ply_airplane_pcd'
+    input_folder = 'ply'
     output_folder = 'render'
     
     start_idx = 0
-    end_idx = 404
-    target_files = [f'{i:06d}.ply' for i in range(start_idx, end_idx + 1)]
+    end_idx = 661
+    target_files = [f'ply_{i}.ply' for i in range(start_idx, end_idx + 1)]
     
     os.makedirs(output_folder, exist_ok=True)
     
