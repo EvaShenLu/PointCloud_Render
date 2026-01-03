@@ -17,7 +17,7 @@ class XMLTemplates:
         <float name="farClip" value="100"/>
         <float name="nearClip" value="0.1"/>
         <transform name="toWorld">
-            <lookat origin="2.2,2.2,4.2" target="0,0,-0.1" up="0,0,1"/>
+            <lookat origin="2.2,2.2,4.2" target="0,0,0" up="0,0,1"/>
         </transform>
         <float name="fov" value="30"/>
         <sampler type="independent">
