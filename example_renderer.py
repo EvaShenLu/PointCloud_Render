@@ -17,15 +17,15 @@ class XMLTemplates:
         <float name="farClip" value="100"/>
         <float name="nearClip" value="0.1"/>
         <transform name="toWorld">
-            <lookat origin="2.2,2.2,4.2" target="0,0,0" up="0,0,1"/>
+            <lookat origin="2.0,2.0,2.2" target="0,0,0" up="0,0,1"/>
         </transform>
         <float name="fov" value="30"/>
         <sampler type="independent">
             <integer name="sampleCount" value="256"/>
         </sampler>
         <film type="hdrfilm">
-            <integer name="width" value="1920"/>
-            <integer name="height" value="1080"/>
+            <integer name="width" value="1440"/>
+            <integer name="height" value="1440"/>
             <rfilter type="gaussian"/>
         </film>
     </sensor>
@@ -57,7 +57,7 @@ class XMLTemplates:
         <ref name="bsdf" id="surfaceMaterial"/>
         <transform name="toWorld">
             <scale x="10" y="10" z="1"/>
-            <translate x="0" y="0" z="-0.2"/>
+            <translate x="0" y="0" z="{floor_z}"/>
         </transform>
     </shape>
     
@@ -117,6 +117,9 @@ class PointCloudRenderer:
         pcl_range = pcl_max - pcl_min
         pcl_center = (pcl_min + pcl_max) / 2.0
         
+        # Calculate floor position: slightly below the lowest point
+        floor_z = pcl_min[2] - 0.05  # 0.05 units below the lowest point
+        
         for idx, point in enumerate(pcl):
             normalized_point = (point - pcl_min) / (pcl_range + 1e-8)
             color = self.compute_color(
@@ -124,7 +127,7 @@ class PointCloudRenderer:
                 noise_seed=idx)
             xml_segments.append(self.XML_BALL_SEGMENT.format(
                 point[0], point[1], point[2], *color))
-        xml_segments.append(self.XML_TAIL)
+        xml_segments.append(self.XML_TAIL.format(floor_z=floor_z))
         return ''.join(xml_segments)
 
     @staticmethod
