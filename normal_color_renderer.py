@@ -1,7 +1,7 @@
 import numpy as np
 import os
 import sys
-from plyfile import PlyData
+from plyfile import PlyData, PlyElement
 import mitsuba as mi
 
 
@@ -38,52 +38,103 @@ class NormalColorRenderer:
         
     @staticmethod
     def init_mitsuba_variant():
-        """初始化Mitsuba variant，优先使用GPU"""
+        """初始化Mitsuba variant，使用GPU"""
         try:
             mi.set_variant('cuda_ad_rgb')
             print('Using CUDA GPU (cuda_ad_rgb)')
-            return True
         except:
             try:
                 mi.set_variant('cuda_rgb')
                 print('Using CUDA GPU (cuda_rgb)')
-                return True
-            except:
-                mi.set_variant('scalar_rgb')
-                print('Using CPU (scalar_rgb) - GPU not available')
-                return False
+            except Exception as e:
+                raise RuntimeError(f'Failed to initialize GPU. CUDA not available: {e}')
+    
+    
+    @staticmethod
+    def _read_ply_header_fast(file_path):
+        """
+        快速读取PLY文件header，返回顶点数量和header大小
+        
+        Returns:
+            num_vertices: 顶点数量
+            header_size: header字节大小
+        """
+        with open(file_path, 'rb') as f:
+            header_lines = []
+            while True:
+                line = f.readline()
+                header_lines.append(line)
+                if b'end_header' in line:
+                    break
+            header_size = sum(len(line) for line in header_lines)
+            
+            # 从header中提取顶点数量
+            num_vertices = None
+            for line in header_lines:
+                if b'element vertex' in line:
+                    parts = line.decode('ascii', errors='ignore').split()
+                    if len(parts) >= 3:
+                        num_vertices = int(parts[2])
+                        break
+            
+            if num_vertices is None:
+                raise ValueError('Could not find vertex count in PLY header')
+            
+            return num_vertices, header_size
+    
+    @staticmethod
+    def _read_ply_binary_fast(file_path, num_vertices, header_size):
+        """
+        使用np.fromfile快速读取PLY二进制数据（跳过Python解析开销）
+        
+        Args:
+            file_path: PLY文件路径
+            num_vertices: 顶点数量
+            header_size: header大小（字节）
+            
+        Returns:
+            positions: (N, 3) 位置数组
+            normals: (N, 3) 法向量数组
+            batch_indices: (N,) 批次索引数组或None
+        """
+        # 定义顶点数据结构：x(4) + y(4) + z(4) + nx(4) + ny(4) + nz(4) + batch_idx(4) = 28字节
+        dtype = np.dtype([
+            ('x', '<f4'),      # little-endian float32
+            ('y', '<f4'),
+            ('z', '<f4'),
+            ('nx', '<f4'),
+            ('ny', '<f4'),
+            ('nz', '<f4'),
+            ('batch_idx', '<i4')  # little-endian int32
+        ])
+        
+        # 直接从文件读取二进制数据（跳过header）
+        with open(file_path, 'rb') as f:
+            f.seek(header_size)  # 跳过header
+            data = np.fromfile(f, dtype=dtype, count=num_vertices)
+        
+        # 提取位置、法向量和批次索引
+        positions = np.column_stack([data['x'], data['y'], data['z']]).astype(np.float32)
+        normals = np.column_stack([data['nx'], data['ny'], data['nz']]).astype(np.float32)
+        batch_indices = data['batch_idx'].astype(np.int32)
+        
+        return positions, normals, batch_indices
     
     def load_point_cloud(self):
-        """加载PLY文件，返回位置、法向量和批次索引"""
+        """
+        加载PLY文件，返回位置、法向量和批次索引
+        使用优化的二进制读取方法，跳过Python解析开销
+        """
         file_extension = os.path.splitext(self.file_path)[1]
         
         if file_extension == '.ply':
-            ply_data = PlyData.read(self.file_path)
-            vertex_data = ply_data['vertex']
+            # 快速读取：先读header获取信息
+            num_vertices, header_size = self._read_ply_header_fast(self.file_path)
             
-            # 读取位置
-            positions = np.column_stack([
-                vertex_data['x'],
-                vertex_data['y'],
-                vertex_data['z']
-            ]).astype(np.float32)
-            
-            # 读取法向量 - 使用try-except检查字段是否存在
-            try:
-                normals = np.column_stack([
-                    vertex_data['nx'],
-                    vertex_data['ny'],
-                    vertex_data['nz']
-                ]).astype(np.float32)
-            except (KeyError, ValueError) as e:
-                raise ValueError(f'PLY file does not contain normal vectors (nx, ny, nz): {e}')
-            
-            # 读取批次索引
-            try:
-                batch_indices = vertex_data['batch_idx'].astype(np.int32)
-            except (KeyError, ValueError):
-                # 如果没有batch_idx字段，返回None
-                batch_indices = None
+            # 使用np.fromfile直接读取二进制数据（比PlyData.read快得多）
+            positions, normals, batch_indices = self._read_ply_binary_fast(
+                self.file_path, num_vertices, header_size
+            )
             
             return positions, normals, batch_indices
         else:
@@ -92,7 +143,7 @@ class NormalColorRenderer:
     @staticmethod
     def normal_to_rgb(normals):
         """
-        将法向量映射到RGB颜色
+        将法向量映射到RGB颜色（优化版本）
         
         Args:
             normals: (N, 3) 法向量数组
@@ -100,17 +151,16 @@ class NormalColorRenderer:
         Returns:
             rgb: (N, 3) RGB颜色数组，范围[0, 1]
         """
-        # 归一化法向量
-        norms = np.linalg.norm(normals, axis=1, keepdims=True)
+        # 归一化法向量（使用更高效的向量化操作）
+        # 使用平方和开方，避免重复计算
+        norms = np.sqrt(np.sum(normals ** 2, axis=1, keepdims=True))
         normalized = normals / (norms + 1e-8)
         
         # 映射到[0, 1]范围: (normal + 1) / 2
-        rgb = (normalized + 1.0) / 2.0
+        rgb = (normalized + 1.0) * 0.5
         
-        # 确保值在[0, 1]范围内
-        rgb = np.clip(rgb, 0.0, 1.0)
-        
-        return rgb
+        # 确保值在[0, 1]范围内（clip比条件判断快）
+        return np.clip(rgb, 0.0, 1.0)
     
     @staticmethod
     def compute_adaptive_radius(positions):
@@ -141,7 +191,7 @@ class NormalColorRenderer:
     @staticmethod
     def standardize_point_cloud(positions):
         """
-        标准化点云：居中并缩放到单位范围
+        标准化点云：居中并缩放到单位范围（优化版本）
         
         Args:
             positions: (N, 3) 位置数组
@@ -151,11 +201,15 @@ class NormalColorRenderer:
             center: 原始中心
             scale: 原始缩放
         """
-        center = np.mean(positions, axis=0)
+        # 使用更高效的计算方式
+        center = np.mean(positions, axis=0, dtype=np.float32)
         positions_centered = positions - center
         scale = np.max(np.abs(positions_centered))
+        
+        # 避免除法，使用乘法（更快）
         if scale > 1e-8:
-            standardized = positions_centered / scale
+            inv_scale = 1.0 / scale
+            standardized = positions_centered * inv_scale
         else:
             standardized = positions_centered
         
@@ -177,7 +231,7 @@ class NormalColorRenderer:
             'type': 'scene',
             'integrator': {
                 'type': 'path',
-                'max_depth': -1
+                'max_depth': 8  # 限制最大深度以提高渲染速度（-1表示无限深度）
             },
             'sensor': {
                 'type': 'perspective',
@@ -211,11 +265,11 @@ class NormalColorRenderer:
             center: 点云中心点 (3,)
             bbox_size: 边界框大小
         """
-        # 创建地面
+        # 创建地面（增大尺寸以避免露出黑色背景）
         floor_z = bbox_min[2] - bbox_size * 0.1
         scene_dict['floor'] = {
             'type': 'rectangle',
-            'to_world': (mi.ScalarTransform4f.scale([bbox_size * 2, bbox_size * 2, 1.0])
+            'to_world': (mi.ScalarTransform4f.scale([bbox_size * 5, bbox_size * 5, 1.0])
                         @ mi.ScalarTransform4f.translate([0, 0, floor_z])),
             'bsdf': {
                 'type': 'roughplastic',
@@ -226,7 +280,7 @@ class NormalColorRenderer:
             }
         }
         
-        # 创建背景光源
+        # 创建背景光源（降低亮度）
         scene_dict['background'] = {
             'type': 'rectangle',
             'to_world': (mi.ScalarTransform4f.scale([bbox_size * 3, bbox_size * 3, 1.0])
@@ -237,13 +291,170 @@ class NormalColorRenderer:
                         )),
             'emitter': {
                 'type': 'area',
-                'radiance': {'type': 'rgb', 'value': [4.0, 4.0, 4.0]}
+                'radiance': {'type': 'rgb', 'value': [1.8, 1.8, 1.8]}
             }
         }
     
-    def build_scene(self, positions, colors, radius, bbox_min=None, bbox_max=None, center=None, bbox_size=None):
+    def _create_colored_ply(self, positions, colors):
         """
-        使用Mitsuba Python API构建场景，优化大量粒子的渲染
+        创建带颜色的PLY文件（二进制格式，高效）
+        
+        Args:
+            positions: (N, 3) 位置数组
+            colors: (N, 3) RGB颜色数组，范围[0, 1]
+            
+        Returns:
+            ply_file_path: 临时PLY文件路径
+        """
+        num_points = len(positions)
+        
+        # 将颜色从[0,1]转换为[0,255]的uint8
+        colors_uint8 = (colors * 255).astype(np.uint8)
+        
+        # 创建PLY顶点数据
+        vertex_data = np.empty(num_points, dtype=[
+            ('x', 'f4'), ('y', 'f4'), ('z', 'f4'),
+            ('red', 'u1'), ('green', 'u1'), ('blue', 'u1')
+        ])
+        
+        vertex_data['x'] = positions[:, 0]
+        vertex_data['y'] = positions[:, 1]
+        vertex_data['z'] = positions[:, 2]
+        vertex_data['red'] = colors_uint8[:, 0]
+        vertex_data['green'] = colors_uint8[:, 1]
+        vertex_data['blue'] = colors_uint8[:, 2]
+        
+        # 创建PlyElement
+        el = PlyElement.describe(vertex_data, 'vertex')
+        
+        # 写入临时文件
+        import tempfile
+        tmp_ply = tempfile.NamedTemporaryFile(mode='wb', suffix='.ply', delete=False)
+        tmp_ply_path = tmp_ply.name
+        tmp_ply.close()
+        
+        PlyData([el], text=False).write(tmp_ply_path)
+        
+        return tmp_ply_path
+    
+    def _build_scene_xml_from_ply(self, ply_file_path, radius, bbox_min, bbox_max, center, bbox_size, 
+                                   camera_origin, add_environment):
+        """
+        从PLY文件生成简化的XML场景（只包含相机、环境和点云引用）
+        
+        Args:
+            ply_file_path: PLY文件路径
+            radius: 粒子半径
+            bbox_min: 边界框最小值
+            bbox_max: 边界框最大值
+            center: 点云中心
+            bbox_size: 边界框大小
+            camera_origin: 相机位置
+            add_environment: 是否添加地板和背景光源
+            
+        Returns:
+            xml_string: XML场景字符串
+        """
+        # 读取PLY文件获取点数和颜色信息
+        ply_data = PlyData.read(ply_file_path)
+        vertex_data = ply_data['vertex']
+        num_points = len(vertex_data)
+        
+        # 构建XML头部
+        xml_parts = ['<scene version="0.6.0">']
+        
+        # 积分器
+        xml_parts.append('    <integrator type="path">')
+        xml_parts.append('        <integer name="maxDepth" value="8"/>')
+        xml_parts.append('    </integrator>')
+        
+        # 传感器（相机）
+        xml_parts.append('    <sensor type="perspective">')
+        xml_parts.append(f'        <float name="fov" value="30"/>')
+        xml_parts.append('        <transform name="toWorld">')
+        xml_parts.append(f'            <lookat origin="{camera_origin[0]:.6f},{camera_origin[1]:.6f},{camera_origin[2]:.6f}" '
+                        f'target="{center[0]:.6f},{center[1]:.6f},{center[2]:.6f}" up="0,0,1"/>')
+        xml_parts.append('        </transform>')
+        xml_parts.append('        <film type="hdrfilm">')
+        xml_parts.append(f'            <integer name="width" value="{self.image_width}"/>')
+        xml_parts.append(f'            <integer name="height" value="{self.image_height}"/>')
+        xml_parts.append('            <rfilter type="gaussian"/>')
+        xml_parts.append('        </film>')
+        xml_parts.append('        <sampler type="independent">')
+        xml_parts.append(f'            <integer name="sampleCount" value="{self.samples}"/>')
+        xml_parts.append('        </sampler>')
+        xml_parts.append('    </sensor>')
+        
+        # 使用merge shape，从PLY文件读取点并创建球体
+        xml_parts.append('    <shape type="merge">')
+        
+        # 从PLY文件读取数据并生成粒子XML
+        print(f'    Creating {num_points:,} particle shapes from PLY...', end=' ', flush=True)
+        progress_interval = max(1, num_points // 20)
+        
+        particle_xmls = []
+        for idx in range(num_points):
+            pos = np.array([vertex_data['x'][idx], vertex_data['y'][idx], vertex_data['z'][idx]])
+            # 从PLY读取颜色（uint8转回[0,1]）
+            color = np.array([
+                vertex_data['red'][idx] / 255.0,
+                vertex_data['green'][idx] / 255.0,
+                vertex_data['blue'][idx] / 255.0
+            ])
+            
+            particle_xml = f'''        <shape type="sphere">
+            <float name="radius" value="{radius:.6f}"/>
+            <transform name="toWorld">
+                <translate x="{pos[0]:.6f}" y="{pos[1]:.6f}" z="{pos[2]:.6f}"/>
+            </transform>
+            <bsdf type="diffuse">
+                <rgb name="reflectance" value="{color[0]:.6f},{color[1]:.6f},{color[2]:.6f}"/>
+            </bsdf>
+        </shape>'''
+            particle_xmls.append(particle_xml)
+            
+            if (idx + 1) % progress_interval == 0 or (idx + 1) == num_points:
+                progress = (idx + 1) * 100 // num_points
+                print(f'{progress}%', end=' ', flush=True)
+        
+        xml_parts.extend(particle_xmls)
+        xml_parts.append('    </shape>')
+        
+        # 添加环境（地板和背景光源）
+        if add_environment:
+            floor_z = bbox_min[2] - bbox_size * 0.1
+            xml_parts.append('    <shape type="rectangle">')
+            xml_parts.append(f'        <transform name="toWorld">')
+            xml_parts.append(f'            <scale x="{bbox_size * 5:.6f}" y="{bbox_size * 5:.6f}" z="1.0"/>')
+            xml_parts.append(f'            <translate x="0" y="0" z="{floor_z:.6f}"/>')
+            xml_parts.append(f'        </transform>')
+            xml_parts.append('        <bsdf type="roughplastic">')
+            xml_parts.append('            <string name="distribution" value="ggx"/>')
+            xml_parts.append('            <float name="alpha" value="0.1"/>')
+            xml_parts.append('            <float name="intIOR" value="1.46"/>')
+            xml_parts.append('            <rgb name="diffuseReflectance" value="1.0,1.0,1.0"/>')
+            xml_parts.append('        </bsdf>')
+            xml_parts.append('    </shape>')
+            
+            bg_z = center[2] + bbox_size * 2
+            xml_parts.append('    <shape type="rectangle">')
+            xml_parts.append(f'        <transform name="toWorld">')
+            xml_parts.append(f'            <scale x="{bbox_size * 3:.6f}" y="{bbox_size * 3:.6f}" z="1.0"/>')
+            xml_parts.append(f'            <lookat origin="0,0,{bg_z:.6f}" target="{center[0]:.6f},{center[1]:.6f},{center[2]:.6f}" up="0,1,0"/>')
+            xml_parts.append(f'        </transform>')
+            xml_parts.append('        <emitter type="area">')
+            xml_parts.append('            <rgb name="radiance" value="2.0,2.0,2.0"/>')
+            xml_parts.append('        </emitter>')
+            xml_parts.append('    </shape>')
+        
+        xml_parts.append('</scene>')
+        print('Done')
+        
+        return '\n'.join(xml_parts)
+    
+    def build_scene(self, positions, colors, radius, bbox_min=None, bbox_max=None, center=None, bbox_size=None, add_environment=True):
+        """
+        使用XML字符串生成场景（高性能版本），避免Python字典构建的性能瓶颈
         
         Args:
             positions: (N, 3) 位置数组
@@ -253,75 +464,54 @@ class NormalColorRenderer:
             bbox_max: 边界框最大值（可选，用于分批渲染时保持场景一致）
             center: 点云中心（可选，用于分批渲染时保持场景一致）
             bbox_size: 边界框大小（可选，用于分批渲染时保持场景一致）
+            add_environment: 是否添加地板和背景光源（默认True）
             
         Returns:
             scene: Mitsuba场景对象
         """
-        # 计算点云边界框以设置合适的相机位置
-        if bbox_min is None:
+        # 计算点云边界框以设置合适的相机位置（优化：一次性计算）
+        if bbox_min is None or bbox_max is None:
             bbox_min = np.min(positions, axis=0)
-        if bbox_max is None:
             bbox_max = np.max(positions, axis=0)
         if center is None:
-            center = (bbox_min + bbox_max) / 2.0
+            center = (bbox_min + bbox_max) * 0.5  # 使用乘法代替除法
         if bbox_size is None:
             bbox_size = np.max(bbox_max - bbox_min)
         
-        # 相机位置：在点云上方和侧面
-        camera_distance = bbox_size * 2.5
+        # 相机位置：在点云上方和侧面（增加距离）
+        camera_distance = bbox_size * 3.5
         camera_origin = center + np.array([camera_distance * 0.7, 
                                            camera_distance * 0.7, 
                                            camera_distance * 0.5])
         
-        # 创建基础场景配置
-        scene_dict = self._create_base_scene_dict(center, bbox_size, camera_origin)
-        
-        # 使用merge shape优化：将所有粒子合并到一个merge shape中
-        # 根据Mitsuba3 issue #1017，对于简单几何体，merge比独立shape快>100倍
-        # 
-        # Merge shape的正确用法（参考GitHub issue #1017）：
-        # - 创建一个字典，type设为'merge'
-        # - 将子shape作为键值对添加到merge字典中（键名可以是任意字符串）
-        # - 每个子shape必须有自己的type、transform和bsdf
-        # - 将merge shape添加到场景字典中作为顶级shape
-        num_points = len(positions)
-        
-        # 创建merge shape来合并所有粒子
-        # 格式：{'type': 'merge', 'particle_0': {...}, 'particle_1': {...}, ...}
-        merge_shape = {'type': 'merge'}
-        
-        # 创建粒子shapes
-        print(f'    Creating {num_points:,} particle shapes...', end=' ', flush=True)
-        for idx, (pos, color) in enumerate(zip(positions, colors)):
-            merge_shape[f'particle_{idx}'] = {
-                'type': 'sphere',
-                'radius': radius,
-                'to_world': mi.ScalarTransform4f.translate(pos.tolist()),
-                'bsdf': {
-                    'type': 'diffuse',
-                    'reflectance': {
-                        'type': 'rgb',
-                        'value': color.tolist()
-                    }
-                }
-            }
-            # 每10%显示一次进度
-            if (idx + 1) % (num_points // 10 + 1) == 0 or (idx + 1) == num_points:
-                progress = int((idx + 1) * 100 / num_points)
-                print(f'{progress}%', end=' ', flush=True)
+        # 新方法：创建带颜色的PLY文件，然后从PLY生成XML
+        # 这样可以跳过大量的字符串格式化操作
+        print('    Creating colored PLY file...', end=' ', flush=True)
+        tmp_ply_path = self._create_colored_ply(positions, colors)
         print('Done')
         
-        # 将merge shape添加到场景字典
-        scene_dict['particles'] = merge_shape
+        # 从PLY文件生成简化的XML
+        xml_string = self._build_scene_xml_from_ply(tmp_ply_path, radius, bbox_min, bbox_max, 
+                                                    center, bbox_size, camera_origin, add_environment)
         
-        # 添加地板和背景光源
-        self._add_environment(scene_dict, bbox_min, bbox_max, center, bbox_size)
+        # 写入临时XML文件并加载
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.xml', delete=False) as tmp_file:
+            tmp_file.write(xml_string)
+            tmp_xml_path = tmp_file.name
         
-        # 加载场景
-        print('    Loading scene into Mitsuba...', end=' ', flush=True)
-        scene = mi.load_dict(scene_dict)
-        print('Done')
-        return scene
+        try:
+            print('    Loading scene into Mitsuba...', end=' ', flush=True)
+            scene = mi.load_file(tmp_xml_path)
+            print('Done')
+            return scene
+        finally:
+            # 清理临时文件
+            try:
+                os.unlink(tmp_xml_path)
+                os.unlink(tmp_ply_path)
+            except:
+                pass
     
     def render(self, positions, normals, batch_indices=None, use_batch_rendering=False):
         """
@@ -357,26 +547,29 @@ class NormalColorRenderer:
             radius = self.particle_radius
         print('Done')
         
-        # 计算全局边界框（用于保持场景一致性）
+        # 计算全局边界框（用于保持场景一致性，优化：一次性计算）
         bbox_min = np.min(positions_std, axis=0)
         bbox_max = np.max(positions_std, axis=0)
-        bbox_center = (bbox_min + bbox_max) / 2.0
+        bbox_center = (bbox_min + bbox_max) * 0.5  # 使用乘法代替除法
         bbox_size = np.max(bbox_max - bbox_min)
         
         # 如果使用分批渲染且batch_indices可用
         if use_batch_rendering and batch_indices is not None:
-            # 检查是否有single_batch参数（通过实例变量传递）
+            # 检查是否有single_batch或max_batches参数（通过实例变量传递）
             single_batch_id = getattr(self, '_single_batch_id', None)
+            max_batches = getattr(self, '_max_batches', None)
             return self._render_batched_by_batch_idx(
                 positions_std, colors, radius, batch_indices,
                 bbox_min, bbox_max, bbox_center, bbox_size,
-                single_batch_id=single_batch_id
+                single_batch_id=single_batch_id,
+                max_batches=max_batches
             )
         
         # 一次性渲染所有粒子
         # 注意：使用merge shape优化后，一次性渲染已经非常高效（比独立shape快>100倍）
         scene = self.build_scene(positions_std, colors, radius, 
-                                bbox_min, bbox_max, bbox_center, bbox_size)
+                                bbox_min, bbox_max, bbox_center, bbox_size,
+                                add_environment=True)
         
         # 渲染场景，使用进度回调显示进度
         print('  Rendering scene (this may take a while)...', flush=True)
@@ -406,9 +599,9 @@ class NormalColorRenderer:
     
     def _render_batched_by_batch_idx(self, positions, colors, radius, batch_indices,
                                      bbox_min, bbox_max, center, bbox_size,
-                                     single_batch_id=None):
+                                     single_batch_id=None, max_batches=None):
         """
-        按batch_idx分批渲染点云
+        按batch_idx收集粒子并一次性渲染
         
         Args:
             positions: (N, 3) 标准化后的位置数组
@@ -420,71 +613,71 @@ class NormalColorRenderer:
             center: 全局中心点
             bbox_size: 全局边界框大小
             single_batch_id: 如果指定，只渲染这个batch ID（用于测试）
+            max_batches: 如果指定，最多渲染这么多batch（用于测试）
             
         Returns:
-            image: 合并后的渲染图像
+            image: 渲染的图像
         """
         # 获取唯一的批次ID并排序
         unique_batches = np.unique(batch_indices)
         unique_batches = np.sort(unique_batches)
+        total_batches = len(unique_batches)
         
-        # 如果指定了single_batch_id，只渲染该batch
+        # 确定要渲染的batch列表
         if single_batch_id is not None:
             if single_batch_id not in unique_batches:
                 raise ValueError(f'Batch ID {single_batch_id} not found. Available batch IDs: {unique_batches[0]} to {unique_batches[-1]}')
-            unique_batches = [single_batch_id]
-            print(f'  Rendering single batch {single_batch_id} (test mode)...')
+            selected_batches = [single_batch_id]
+            num_batches = 1
+            print(f'  Collecting particles from batch {single_batch_id}...')
+        elif max_batches is not None:
+            # 限制渲染的batch数量
+            selected_batches = unique_batches[:max_batches]
+            num_batches = len(selected_batches)
+            print(f'  Collecting particles from {num_batches} batches (out of {total_batches} total)...')
         else:
-            num_batches = len(unique_batches)
-            print(f'  Rendering {num_batches} batches (batch size: {len(positions) // num_batches} particles per batch)...')
+            selected_batches = unique_batches
+            num_batches = total_batches
+            print(f'  Collecting particles from all {num_batches} batches...')
         
-        # 初始化累积图像（使用alpha混合）
-        accumulated_image = None
+        # 收集所有指定batch的粒子
+        batch_mask = np.isin(batch_indices, selected_batches)
+        selected_positions = positions[batch_mask]
+        selected_colors = colors[batch_mask]
+        num_particles = len(selected_positions)
         
-        # 按批次渲染
-        for batch_idx, batch_id in enumerate(unique_batches):
-            # 获取当前批次的粒子索引
-            batch_mask = batch_indices == batch_id
-            batch_positions = positions[batch_mask]
-            batch_colors = colors[batch_mask]
-            num_batch_particles = len(batch_positions)
-            
-            print(f'    Batch {batch_id} ({batch_idx + 1}/{num_batches}): {num_batch_particles:,} particles...', 
-                  end=' ', flush=True)
-            
-            # 为当前批次构建场景（使用全局边界框保持一致性）
-            scene = self.build_scene(batch_positions, batch_colors, radius,
-                                    bbox_min, bbox_max, center, bbox_size)
-            
-            # 渲染当前批次
-            batch_image = mi.render(scene)
-            
-            # 转换为numpy数组以便处理
-            batch_image_np = mi.util.convert_to_bitmap(batch_image)
-            
-            # 合并图像：使用alpha混合或直接叠加
-            # 对于点云渲染，我们使用简单的叠加（因为粒子是半透明的）
-            if accumulated_image is None:
-                accumulated_image = batch_image_np.copy()
-            else:
-                # 叠加：新图像覆盖旧图像（点云粒子会自然混合）
-                # 使用最大值混合，保留最亮的像素
-                accumulated_image = np.maximum(accumulated_image, batch_image_np)
-            
-            # 清理场景和图像
-            del scene, batch_image, batch_image_np
-            import gc
-            gc.collect()
-            
+        print(f'  Total particles to render: {num_particles:,}')
+        
+        # 一次性构建场景并渲染
+        scene = self.build_scene(selected_positions, selected_colors, radius,
+                                bbox_min, bbox_max, center, bbox_size,
+                                add_environment=True)
+        
+        # 渲染场景
+        print('  Rendering scene (this may take a while)...', flush=True)
+        
+        # 定义进度回调函数
+        last_progress_percent = -1
+        def progress_callback(progress):
+            """渲染进度回调函数"""
+            nonlocal last_progress_percent
+            progress_percent = int(progress * 100)
+            # 只在进度变化时更新，避免过于频繁的打印
+            if progress_percent != last_progress_percent:
+                print(f'\r  Rendering progress: {progress_percent}%', end='', flush=True)
+                last_progress_percent = progress_percent
+        
+        # 尝试使用进度回调渲染
+        try:
+            image = mi.render(scene, progress=progress_callback)
+            print('\r  Rendering progress: 100% - Done', flush=True)
+        except TypeError:
+            # 如果当前版本的Mitsuba不支持progress参数，回退到普通渲染
+            print('  Rendering...', end=' ', flush=True)
+            image = mi.render(scene)
             print('Done')
         
-        # 转换回Mitsuba图像格式
-        # 使用 mi.Bitmap 将numpy数组转换为Mitsuba图像格式
-        bitmap = mi.Bitmap(accumulated_image)
-        final_image = bitmap.convert(mi.Bitmap.PixelFormat.RGB, mi.Struct.Type.Float32, False)
-        
-        print('  All batches rendered and merged')
-        return final_image
+        return image
     
     
     def save_image(self, output_file_path, image):
@@ -535,9 +728,9 @@ def batch_render(input_folder='trajectory_ply',
                  image_width=1920,
                  image_height=1080,
                  samples=256,
-                 num_workers=1,
                  use_batch_rendering=False,
-                 single_batch_id=None):
+                 single_batch_id=None,
+                 max_batches=None):
     """
     批量渲染PLY文件
     
@@ -550,13 +743,13 @@ def batch_render(input_folder='trajectory_ply',
         image_width: 图像宽度
         image_height: 图像高度
         samples: 采样数
-        num_workers: 并行工作进程数（1表示单进程，>1需要多进程支持）
         use_batch_rendering: 是否使用基于batch_idx的分批渲染
         single_batch_id: 如果指定，只渲染这个batch ID（用于测试，需要use_batch_rendering=True）
+        max_batches: 如果指定，最多渲染这么多batch（用于测试，需要use_batch_rendering=True）
     """
     import glob
     
-    # 初始化Mitsuba
+    # 初始化Mitsuba GPU
     NormalColorRenderer.init_mitsuba_variant()
     
     # 查找所有PLY文件
@@ -592,7 +785,6 @@ def batch_render(input_folder='trajectory_ply',
     print(f'Output folder: {output_folder}')
     print(f'Image size: {image_width}x{image_height}')
     print(f'Samples per pixel: {samples}')
-    print(f'Workers: {num_workers}')
     print('=' * 60)
     
     os.makedirs(output_folder, exist_ok=True)
@@ -600,79 +792,8 @@ def batch_render(input_folder='trajectory_ply',
     successful = 0
     failed = 0
     
-    # 如果使用多进程，需要重新初始化Mitsuba（每个进程独立）
-    if num_workers > 1:
-        try:
-            from multiprocessing import Pool
-            import functools
-            
-            def render_single_file(args):
-                """单文件渲染函数，用于多进程"""
-                ply_file, output_folder, image_width, image_height, samples, file_idx, total_files = args
-                
-                # 每个进程需要重新初始化Mitsuba
-                # 注意：多进程模式下，GPU可能无法共享，会回退到CPU
-                try:
-                    NormalColorRenderer.init_mitsuba_variant()
-                except:
-                    pass  # 如果初始化失败，继续尝试
-                
-                basename = os.path.basename(ply_file)
-                try:
-                    renderer = NormalColorRenderer(
-                        ply_file,
-                        output_folder=output_folder,
-                        image_width=image_width,
-                        image_height=image_height,
-                        samples=samples
-                    )
-                    
-                    positions, normals, batch_indices = renderer.load_point_cloud()
-                    renderer._single_batch_id = single_batch_id if use_batch_rendering else None
-                    image = renderer.render(positions, normals, batch_indices, use_batch_rendering)
-                    renderer.save_image(
-                        os.path.join(output_folder, renderer.filename),
-                        image
-                    )
-                    
-                    # 清理内存
-                    del renderer, positions, normals, image
-                    import gc
-                    gc.collect()
-                    
-                    return (True, basename, None)
-                except Exception as e:
-                    import traceback
-                    return (False, basename, f'{str(e)}\n{traceback.format_exc()}')
-            
-            # 准备参数
-            render_args = [
-                (f, output_folder, image_width, image_height, samples, i+1, total_files)
-                for i, f in enumerate(ply_files)
-            ]
-            
-            # 使用进程池
-            print(f'\nStarting parallel rendering with {num_workers} workers...')
-            print('Note: Multi-process rendering may use CPU instead of GPU')
-            with Pool(processes=num_workers) as pool:
-                results = pool.map(render_single_file, render_args)
-            
-            # 统计结果
-            for success, basename, error in results:
-                if success:
-                    successful += 1
-                    print(f'✓ {basename}')
-                else:
-                    failed += 1
-                    print(f'✗ {basename}: {error}')
-            
-        except ImportError:
-            print('Warning: multiprocessing not available, falling back to single process')
-            num_workers = 1
-    
-    # 单进程渲染
-    if num_workers == 1:
-        for idx, ply_file in enumerate(ply_files, 1):
+    # 单进程GPU渲染
+    for idx, ply_file in enumerate(ply_files, 1):
             basename = os.path.basename(ply_file)
             
             print(f'\n[{idx}/{total_files}] ({idx*100//total_files}%) Processing: {basename}')
@@ -694,6 +815,7 @@ def batch_render(input_folder='trajectory_ply',
                 
                 # 处理和渲染
                 renderer._single_batch_id = single_batch_id if use_batch_rendering else None
+                renderer._max_batches = max_batches if use_batch_rendering else None
                 image = renderer.render(positions, normals, batch_indices, use_batch_rendering)
                 
                 # 保存图像
@@ -744,18 +866,26 @@ if __name__ == '__main__':
                         help='Image height')
     parser.add_argument('--samples', type=int, default=256,
                         help='Samples per pixel')
-    parser.add_argument('--workers', type=int, default=1,
-                        help='Number of parallel workers (multiprocessing)')
     parser.add_argument('--use-batch-rendering', action='store_true',
                         help='Use batch_idx-based batch rendering (256 batches, 2048 particles each)')
     parser.add_argument('--single-batch', type=int, default=None,
                         help='Render only a single batch ID (0-255) for testing (requires --use-batch-rendering)')
+    parser.add_argument('--max-batches', type=int, default=None,
+                        help='Maximum number of batches to render (requires --use-batch-rendering)')
     args = parser.parse_args()
     
     # 验证参数
     if args.single_batch is not None and not args.use_batch_rendering:
         print('Warning: --single-batch requires --use-batch-rendering. Ignoring --single-batch.')
         args.single_batch = None
+    
+    if args.max_batches is not None and not args.use_batch_rendering:
+        print('Warning: --max-batches requires --use-batch-rendering. Ignoring --max-batches.')
+        args.max_batches = None
+    
+    if args.single_batch is not None and args.max_batches is not None:
+        print('Warning: --single-batch and --max-batches cannot be used together. Using --single-batch.')
+        args.max_batches = None
     
     batch_render(
         input_folder=args.input,
@@ -766,8 +896,8 @@ if __name__ == '__main__':
         image_width=args.width,
         image_height=args.height,
         samples=args.samples,
-        num_workers=args.workers,
         use_batch_rendering=args.use_batch_rendering,
-        single_batch_id=args.single_batch
+        single_batch_id=args.single_batch,
+        max_batches=args.max_batches
     )
 
