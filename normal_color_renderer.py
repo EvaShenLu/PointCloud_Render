@@ -14,7 +14,8 @@ class NormalColorRenderer:
     def __init__(self, file_path, output_folder=None, 
                  particle_radius=None, 
                  image_width=1920, image_height=1080,
-                 samples=256):
+                 samples=256,
+                 render_batch_size=20000):
         """
         初始化渲染器
         
@@ -25,6 +26,7 @@ class NormalColorRenderer:
             image_width: 图像宽度
             image_height: 图像高度
             samples: 采样数
+            render_batch_size: 分批渲染的每批粒子数（默认20000，None表示不分批）
         """
         self.file_path = file_path
         self.folder, full_filename = os.path.split(file_path)
@@ -35,6 +37,7 @@ class NormalColorRenderer:
         self.image_width = image_width
         self.image_height = image_height
         self.samples = samples
+        self.render_batch_size = render_batch_size  # None=不分批, >0=每批粒子数（默认20000）
         
     @staticmethod
     def init_mitsuba_variant():
@@ -68,15 +71,15 @@ class NormalColorRenderer:
                 vertex_data['z']
             ]).astype(np.float32)
             
-            # 读取法向量
-            if 'nx' in vertex_data.dtype.names and 'ny' in vertex_data.dtype.names and 'nz' in vertex_data.dtype.names:
+            # 读取法向量 - 使用try-except检查字段是否存在
+            try:
                 normals = np.column_stack([
                     vertex_data['nx'],
                     vertex_data['ny'],
                     vertex_data['nz']
                 ]).astype(np.float32)
-            else:
-                raise ValueError('PLY file does not contain normal vectors (nx, ny, nz)')
+            except (KeyError, ValueError) as e:
+                raise ValueError(f'PLY file does not contain normal vectors (nx, ny, nz): {e}')
             
             return positions, normals
         else:
@@ -206,27 +209,40 @@ class NormalColorRenderer:
             }
         }
         
-        # 批量创建粒子shapes
-        # 直接创建所有shapes，Mitsuba会优化内存使用
+        # 使用instancing：创建一个shapegroup包含模板sphere，然后用N个instance复制
         num_points = len(positions)
         
-        # 直接构建所有粒子shapes到场景字典
-        # 使用生成器表达式来节省内存
-        print(f'    Creating {num_points} particle shapes...', end=' ', flush=True)
+        print(f'    Creating sphere shapegroup and {num_points:,} instances...', flush=True)
         
+        # 创建shapegroup（包含模板sphere，共享几何体）
+        scene_dict['particle_shapegroup'] = {
+            'type': 'shapegroup',
+            'id': 'particle_group',
+            'shape': {
+                'type': 'sphere',
+                'radius': radius
+            }
+        }
+        
+        # 创建所有粒子instances
         # 分批添加到场景字典，避免一次性创建太多键
         batch_size = 50000  # 每批处理50000个粒子
+        total_batches = (num_points + batch_size - 1) // batch_size
+        last_progress = -1
         
-        for batch_start in range(0, num_points, batch_size):
+        for batch_idx, batch_start in enumerate(range(0, num_points, batch_size)):
             batch_end = min(batch_start + batch_size, num_points)
             batch_positions = positions[batch_start:batch_end]
             batch_colors = colors[batch_start:batch_end]
             
             for local_idx, (pos, color) in enumerate(zip(batch_positions, batch_colors)):
                 global_idx = batch_start + local_idx
-                scene_dict[f'particle_{global_idx}'] = {
-                    'type': 'sphere',
-                    'radius': radius,
+                # 创建instance，引用shapegroup，但使用不同的变换和BSDF
+                scene_dict[f'particle_instance_{global_idx}'] = {
+                    'type': 'instance',
+                    'shapegroup': {
+                        'id': 'particle_group'
+                    },
                     'to_world': mi.ScalarTransform4f.translate(pos.tolist()),
                     'bsdf': {
                         'type': 'diffuse',
@@ -236,8 +252,16 @@ class NormalColorRenderer:
                         }
                     }
                 }
+            
+            # 显示进度（每批或每10%更新一次）
+            current_progress = int((batch_idx + 1) * 100 / total_batches)
+            if current_progress != last_progress:
+                particles_created = min(batch_end, num_points)
+                print(f'      Progress: {particles_created:,}/{num_points:,} instances ({current_progress}%)', 
+                      end='\r', flush=True)
+                last_progress = current_progress
         
-        print('Done')
+        print(f'      Progress: {num_points:,}/{num_points:,} instances (100%) - Done!', flush=True)
         
         # 创建地面
         floor_z = bbox_min[2] - bbox_size * 0.1
@@ -270,14 +294,14 @@ class NormalColorRenderer:
         }
         
         # 加载场景
-        print('    Loading scene into Mitsuba...', end=' ', flush=True)
+        print('    Loading scene into Mitsuba (this may take a while for large scenes)...', end=' ', flush=True)
         scene = mi.load_dict(scene_dict)
         print('Done')
         return scene
     
     def render(self, positions, normals):
         """
-        渲染点云
+        渲染点云（支持分批渲染以显示进度）
         
         Args:
             positions: (N, 3) 位置数组
@@ -305,15 +329,168 @@ class NormalColorRenderer:
             radius = self.particle_radius
             print(f'Done (fixed: {radius:.6f})')
         
-        # 构建场景
-        scene = self.build_scene(positions_std, colors, radius)
+        num_points = len(positions_std)
         
-        # 渲染
-        print('  Rendering scene...', end=' ', flush=True)
-        image = mi.render(scene)
+        # 如果指定了batch_size且粒子数足够多，使用分批渲染
+        if self.render_batch_size is not None and self.render_batch_size > 0 and num_points > self.render_batch_size:
+            return self._render_batched(positions_std, colors, radius, self.render_batch_size)
+        else:
+            # 一次性渲染所有粒子
+            scene = self.build_scene(positions_std, colors, radius)
+            print('  Rendering scene (this is the most time-consuming step)...', end=' ', flush=True)
+            image = mi.render(scene)
+            print('Done')
+            return image
+    
+    def _render_batched(self, positions, colors, radius, batch_size):
+        """
+        分批渲染点云，每批显示进度
+        
+        Args:
+            positions: (N, 3) 位置数组
+            colors: (N, 3) RGB颜色数组
+            radius: 粒子半径
+            batch_size: 每批粒子数
+            
+        Returns:
+            image: 合成的渲染图像
+        """
+        num_points = len(positions)
+        num_batches = (num_points + batch_size - 1) // batch_size
+        
+        print(f'  Rendering {num_points:,} particles in {num_batches} batches ({batch_size:,} particles/batch)...')
+        
+        # 计算点云边界框以设置相机（用于所有批次）
+        bbox_min = np.min(positions, axis=0)
+        bbox_max = np.max(positions, axis=0)
+        center = (bbox_min + bbox_max) / 2.0
+        bbox_size = np.max(bbox_max - bbox_min)
+        camera_distance = bbox_size * 2.5
+        camera_origin = center + np.array([camera_distance * 0.7, 
+                                           camera_distance * 0.7, 
+                                           camera_distance * 0.5])
+        
+        # 创建基础场景设置（相机、积分器等）
+        base_scene_dict = {
+            'type': 'scene',
+            'integrator': {
+                'type': 'path',
+                'max_depth': -1
+            },
+            'sensor': {
+                'type': 'perspective',
+                'fov': 30,
+                'to_world': mi.ScalarTransform4f.look_at(
+                    origin=camera_origin.tolist(),
+                    target=center.tolist(),
+                    up=[0, 0, 1]
+                ),
+                'film': {
+                    'type': 'hdrfilm',
+                    'width': self.image_width,
+                    'height': self.image_height,
+                    'rfilter': {'type': 'gaussian'}
+                },
+                'sampler': {
+                    'type': 'independent',
+                    'sample_count': self.samples
+                }
+            }
+        }
+        
+        # 存储每批的渲染结果
+        batch_images = []
+        
+        for batch_idx in range(num_batches):
+            batch_start = batch_idx * batch_size
+            batch_end = min(batch_start + batch_size, num_points)
+            batch_positions = positions[batch_start:batch_end]
+            batch_colors = colors[batch_start:batch_end]
+            
+            # 创建当前批次的场景
+            scene_dict = base_scene_dict.copy()
+            
+            # 创建shapegroup（每批共享）
+            scene_dict['particle_shapegroup'] = {
+                'type': 'shapegroup',
+                'id': 'particle_group',
+                'shape': {
+                    'type': 'sphere',
+                    'radius': radius
+                }
+            }
+            
+            # 添加当前批次的粒子instances
+            for local_idx, (pos, color) in enumerate(zip(batch_positions, batch_colors)):
+                global_idx = batch_start + local_idx
+                scene_dict[f'particle_instance_{local_idx}'] = {
+                    'type': 'instance',
+                    'shapegroup': {
+                        'id': 'particle_group'
+                    },
+                    'to_world': mi.ScalarTransform4f.translate(pos.tolist()),
+                    'bsdf': {
+                        'type': 'diffuse',
+                        'reflectance': {
+                            'type': 'rgb',
+                            'value': color.tolist()
+                        }
+                    }
+                }
+            
+            # 添加地面和背景（只在第一批添加，避免重复）
+            if batch_idx == 0:
+                floor_z = bbox_min[2] - bbox_size * 0.1
+                scene_dict['floor'] = {
+                    'type': 'rectangle',
+                    'to_world': (mi.ScalarTransform4f.scale([bbox_size * 2, bbox_size * 2, 1.0])
+                                @ mi.ScalarTransform4f.translate([0, 0, floor_z])),
+                    'bsdf': {
+                        'type': 'roughplastic',
+                        'distribution': 'ggx',
+                        'alpha': 0.1,
+                        'int_ior': 1.46,
+                        'diffuse_reflectance': {'type': 'rgb', 'value': [1.0, 1.0, 1.0]}
+                    }
+                }
+                
+                scene_dict['background'] = {
+                    'type': 'rectangle',
+                    'to_world': (mi.ScalarTransform4f.scale([bbox_size * 3, bbox_size * 3, 1.0])
+                                @ mi.ScalarTransform4f.look_at(
+                                    origin=[0, 0, center[2] + bbox_size * 2],
+                                    target=center.tolist(),
+                                    up=[0, 1, 0]
+                                )),
+                    'emitter': {
+                        'type': 'area',
+                        'radiance': {'type': 'rgb', 'value': [4.0, 4.0, 4.0]}
+                    }
+                }
+            
+            # 渲染当前批次
+            scene = mi.load_dict(scene_dict)
+            particles_rendered = batch_end
+            progress = int(particles_rendered * 100 / num_points)
+            print(f'      Batch {batch_idx+1}/{num_batches}: Rendering particles {batch_start:,}-{batch_end-1:,} ({particles_rendered:,}/{num_points:,}, {progress}%)...', 
+                  end=' ', flush=True)
+            
+            batch_image = mi.render(scene)
+            batch_images.append(batch_image)
+            
+            print('Done')
+        
+        # 合成所有批次的图像（使用alpha混合或叠加）
+        print('  Compositing batch images...', end=' ', flush=True)
+        final_image = batch_images[0].copy()
+        
+        # 对于后续批次，使用alpha混合叠加
+        for batch_image in batch_images[1:]:
+            # 简单的叠加：取最大值（适用于粒子渲染）
+            final_image = np.maximum(final_image, batch_image)
+        
         print('Done')
-        
-        return image
+        return final_image
     
     def save_image(self, output_file_path, image):
         """
@@ -353,7 +530,8 @@ def batch_render(input_folder='trajectory_ply',
                  image_width=1920,
                  image_height=1080,
                  samples=256,
-                 num_workers=1):
+                 num_workers=1,
+                 render_batch_size=20000):
     """
     批量渲染PLY文件
     
@@ -367,6 +545,7 @@ def batch_render(input_folder='trajectory_ply',
         image_height: 图像高度
         samples: 采样数
         num_workers: 并行工作进程数（1表示单进程，>1需要多进程支持）
+        render_batch_size: 分批渲染的每批粒子数（None表示不分批，一次性渲染更快但无进度显示）
     """
     import glob
     
@@ -438,7 +617,8 @@ def batch_render(input_folder='trajectory_ply',
                         output_folder=output_folder,
                         image_width=image_width,
                         image_height=image_height,
-                        samples=samples
+                        samples=samples,
+                        render_batch_size=render_batch_size
                     )
                     
                     positions, normals = renderer.load_point_cloud()
@@ -487,44 +667,46 @@ def batch_render(input_folder='trajectory_ply',
     if num_workers == 1:
         for idx, ply_file in enumerate(ply_files, 1):
             basename = os.path.basename(ply_file)
-        print(f'\n[{idx}/{total_files}] ({idx*100//total_files}%) Processing: {basename}')
-        print('-' * 60)
-        
-        try:
-            renderer = NormalColorRenderer(
-                ply_file,
-                output_folder=output_folder,
-                image_width=image_width,
-                image_height=image_height,
-                samples=samples
-            )
             
-            print('  Loading point cloud...', end=' ', flush=True)
-            positions, normals = renderer.load_point_cloud()
-            print(f'Done ({len(positions)} points)')
+            print(f'\n[{idx}/{total_files}] ({idx*100//total_files}%) Processing: {basename}')
+            print('-' * 60)
             
-            print('  Rendering...', end=' ', flush=True)
-            image = renderer.render(positions, normals)
-            print('Done')
-            
-            print('  Saving...', end=' ', flush=True)
-            output_path = os.path.join(output_folder, renderer.filename)
-            renderer.save_image(output_path, image)
-            print(f'Done -> {os.path.basename(output_path)}.png')
-            
-            # 清理内存
-            del renderer, positions, normals, image
-            import gc
-            gc.collect()
-            
-            successful += 1
-            print(f'✓ Successfully processed: {basename}')
-            
-        except Exception as e:
-            failed += 1
-            print(f'✗ Error processing {basename}: {str(e)}')
-            import traceback
-            traceback.print_exc()
+            try:
+                renderer = NormalColorRenderer(
+                    ply_file,
+                    output_folder=output_folder,
+                    image_width=image_width,
+                    image_height=image_height,
+                    samples=samples,
+                    render_batch_size=render_batch_size
+                )
+                
+                print('  [1/4] Loading point cloud...', end=' ', flush=True)
+                positions, normals = renderer.load_point_cloud()
+                print(f'Done ({len(positions):,} points)')
+                
+                print('  [2/4] Processing and rendering...', flush=True)
+                image = renderer.render(positions, normals)
+                
+                print('  [3/4] Saving image...', end=' ', flush=True)
+                output_path = os.path.join(output_folder, renderer.filename)
+                renderer.save_image(output_path, image)
+                print(f'Done -> {os.path.basename(output_path)}.png')
+                
+                # 清理内存
+                del renderer, positions, normals, image
+                import gc
+                gc.collect()
+                
+                successful += 1
+                print('  [4/4] Frame completed')
+                print(f'  ✓ Successfully processed: {basename}')
+                
+            except Exception as e:
+                failed += 1
+                print(f'  ✗ Error processing {basename}: {str(e)}')
+                import traceback
+                traceback.print_exc()
     
     print('\n' + '=' * 60)
     print(f'Batch processing completed!')
@@ -556,6 +738,8 @@ if __name__ == '__main__':
                         help='Samples per pixel')
     parser.add_argument('--workers', type=int, default=1,
                         help='Number of parallel workers (multiprocessing)')
+    parser.add_argument('--render-batch-size', type=int, default=20000,
+                        help='Particles per batch for rendering progress (default: 20000)')
     
     args = parser.parse_args()
     
@@ -568,6 +752,7 @@ if __name__ == '__main__':
         image_width=args.width,
         image_height=args.height,
         samples=args.samples,
-        num_workers=args.workers
+        num_workers=args.workers,
+        render_batch_size=args.render_batch_size
     )
 
