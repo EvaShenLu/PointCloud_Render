@@ -120,6 +120,45 @@ class NormalColorRenderer:
         
         return positions, normals, batch_indices
     
+    @staticmethod
+    def _read_colored_ply_binary_fast(file_path, num_vertices, header_size):
+        """
+        快速读取带颜色的PLY文件（x, y, z, red, green, blue）
+        
+        Args:
+            file_path: PLY文件路径
+            num_vertices: 顶点数量
+            header_size: header大小（字节）
+            
+        Returns:
+            positions: (N, 3) 位置数组
+            colors: (N, 3) RGB颜色数组，范围[0, 1]
+        """
+        # 定义顶点数据结构：x(4) + y(4) + z(4) + red(1) + green(1) + blue(1) = 15字节
+        dtype = np.dtype([
+            ('x', '<f4'),      # little-endian float32
+            ('y', '<f4'),
+            ('z', '<f4'),
+            ('red', 'u1'),    # uint8
+            ('green', 'u1'),
+            ('blue', 'u1')
+        ])
+        
+        # 直接从文件读取二进制数据（跳过header）
+        with open(file_path, 'rb') as f:
+            f.seek(header_size)  # 跳过header
+            data = np.fromfile(f, dtype=dtype, count=num_vertices)
+        
+        # 提取位置和颜色
+        positions = np.column_stack([data['x'], data['y'], data['z']]).astype(np.float32)
+        colors = np.column_stack([
+            data['red'] / 255.0,
+            data['green'] / 255.0,
+            data['blue'] / 255.0
+        ]).astype(np.float32)
+        
+        return positions, colors
+    
     def load_point_cloud(self):
         """
         加载PLY文件，返回位置、法向量和批次索引
@@ -230,8 +269,7 @@ class NormalColorRenderer:
         return {
             'type': 'scene',
             'integrator': {
-                'type': 'path',
-                'max_depth': 8  # 限制最大深度以提高渲染速度（-1表示无限深度）
+                'type': 'direct'  # 使用direct积分器，极速渲染，只计算直接光照
             },
             'sensor': {
                 'type': 'perspective',
@@ -297,7 +335,7 @@ class NormalColorRenderer:
     
     def _create_colored_ply(self, positions, colors):
         """
-        创建带颜色的PLY文件（二进制格式，高效）
+        创建带颜色的PLY文件（直接二进制写入，避免Python序列化开销）
         
         Args:
             positions: (N, 3) 位置数组
@@ -311,36 +349,56 @@ class NormalColorRenderer:
         # 将颜色从[0,1]转换为[0,255]的uint8
         colors_uint8 = (colors * 255).astype(np.uint8)
         
-        # 创建PLY顶点数据
-        vertex_data = np.empty(num_points, dtype=[
-            ('x', 'f4'), ('y', 'f4'), ('z', 'f4'),
-            ('red', 'u1'), ('green', 'u1'), ('blue', 'u1')
+        # 创建临时文件
+        import tempfile
+        tmp_ply = tempfile.NamedTemporaryFile(mode='wb', suffix='.ply', delete=False)
+        tmp_ply_path = tmp_ply.name
+        
+        # 写入ASCII header
+        header = f"""ply
+format binary_little_endian 1.0
+element vertex {num_points}
+property float x
+property float y
+property float z
+property uchar red
+property uchar green
+property uchar blue
+end_header
+"""
+        tmp_ply.write(header.encode('ascii'))
+        
+        # 直接写入二进制数据（使用结构化数组，避免循环）
+        # 定义dtype：x(4) + y(4) + z(4) + red(1) + green(1) + blue(1) = 15字节
+        dtype = np.dtype([
+            ('x', '<f4'),      # little-endian float32
+            ('y', '<f4'),
+            ('z', '<f4'),
+            ('red', 'u1'),    # uint8
+            ('green', 'u1'),
+            ('blue', 'u1')
         ])
         
-        vertex_data['x'] = positions[:, 0]
-        vertex_data['y'] = positions[:, 1]
-        vertex_data['z'] = positions[:, 2]
+        # 创建结构化数组
+        vertex_data = np.empty(num_points, dtype=dtype)
+        vertex_data['x'] = positions[:, 0].astype(np.float32)
+        vertex_data['y'] = positions[:, 1].astype(np.float32)
+        vertex_data['z'] = positions[:, 2].astype(np.float32)
         vertex_data['red'] = colors_uint8[:, 0]
         vertex_data['green'] = colors_uint8[:, 1]
         vertex_data['blue'] = colors_uint8[:, 2]
         
-        # 创建PlyElement
-        el = PlyElement.describe(vertex_data, 'vertex')
+        # 直接写入二进制数据（非常快）
+        vertex_data.tofile(tmp_ply)
         
-        # 写入临时文件
-        import tempfile
-        tmp_ply = tempfile.NamedTemporaryFile(mode='wb', suffix='.ply', delete=False)
-        tmp_ply_path = tmp_ply.name
         tmp_ply.close()
-        
-        PlyData([el], text=False).write(tmp_ply_path)
         
         return tmp_ply_path
     
     def _build_scene_xml_from_ply(self, ply_file_path, radius, bbox_min, bbox_max, center, bbox_size, 
                                    camera_origin, add_environment):
         """
-        从PLY文件生成简化的XML场景（只包含相机、环境和点云引用）
+        从PLY文件生成XML场景（优化的批量字符串生成，避免Python循环开销）
         
         Args:
             ply_file_path: PLY文件路径
@@ -355,18 +413,16 @@ class NormalColorRenderer:
         Returns:
             xml_string: XML场景字符串
         """
-        # 读取PLY文件获取点数和颜色信息
-        ply_data = PlyData.read(ply_file_path)
-        vertex_data = ply_data['vertex']
-        num_points = len(vertex_data)
+        # 快速读取PLY文件（使用二进制读取，避免PlyData开销）
+        num_vertices, header_size = self._read_ply_header_fast(ply_file_path)
+        positions, colors = self._read_colored_ply_binary_fast(ply_file_path, num_vertices, header_size)
+        num_points = len(positions)
         
         # 构建XML头部
         xml_parts = ['<scene version="0.6.0">']
         
-        # 积分器
-        xml_parts.append('    <integrator type="path">')
-        xml_parts.append('        <integer name="maxDepth" value="8"/>')
-        xml_parts.append('    </integrator>')
+        # 积分器 (使用direct积分器，极速渲染，只计算直接光照)
+        xml_parts.append('    <integrator type="direct"/>')
         
         # 传感器（相机）
         xml_parts.append('    <sensor type="perspective">')
@@ -385,40 +441,39 @@ class NormalColorRenderer:
         xml_parts.append('        </sampler>')
         xml_parts.append('    </sensor>')
         
-        # 使用merge shape，从PLY文件读取点并创建球体
+        # 使用merge shape合并所有粒子
         xml_parts.append('    <shape type="merge">')
         
-        # 从PLY文件读取数据并生成粒子XML
-        print(f'    Creating {num_points:,} particle shapes from PLY...', end=' ', flush=True)
-        progress_interval = max(1, num_points // 20)
+        # 优化的批量字符串生成（使用列表推导式和模板，避免循环中的字符串拼接）
+        print(f'    Creating {num_points:,} particle shapes (optimized batch generation)...', end=' ', flush=True)
         
-        particle_xmls = []
-        for idx in range(num_points):
-            pos = np.array([vertex_data['x'][idx], vertex_data['y'][idx], vertex_data['z'][idx]])
-            # 从PLY读取颜色（uint8转回[0,1]）
-            color = np.array([
-                vertex_data['red'][idx] / 255.0,
-                vertex_data['green'][idx] / 255.0,
-                vertex_data['blue'][idx] / 255.0
-            ])
-            
-            particle_xml = f'''        <shape type="sphere">
-            <float name="radius" value="{radius:.6f}"/>
+        # 使用字符串模板和列表推导式，比循环中的字符串拼接快得多
+        particle_template = '''        <shape type="sphere">
+            <float name="radius" value="{radius}"/>
             <transform name="toWorld">
-                <translate x="{pos[0]:.6f}" y="{pos[1]:.6f}" z="{pos[2]:.6f}"/>
+                <translate x="{x:.6f}" y="{y:.6f}" z="{z:.6f}"/>
             </transform>
             <bsdf type="diffuse">
-                <rgb name="reflectance" value="{color[0]:.6f},{color[1]:.6f},{color[2]:.6f}"/>
+                <rgb name="reflectance" value="{r:.6f},{g:.6f},{b:.6f}"/>
             </bsdf>
         </shape>'''
-            particle_xmls.append(particle_xml)
-            
-            if (idx + 1) % progress_interval == 0 or (idx + 1) == num_points:
-                progress = (idx + 1) * 100 // num_points
-                print(f'{progress}%', end=' ', flush=True)
+        
+        radius_str = f'{radius:.6f}'
+        
+        # 批量生成所有粒子的XML（列表推导式比循环快，且内存效率更高）
+        # 虽然还是需要遍历，但列表推导式比显式循环+字符串拼接快得多
+        particle_xmls = [
+            particle_template.format(
+                radius=radius_str,
+                x=pos[0], y=pos[1], z=pos[2],
+                r=color[0], g=color[1], b=color[2]
+            )
+            for pos, color in zip(positions, colors)
+        ]
         
         xml_parts.extend(particle_xmls)
         xml_parts.append('    </shape>')
+        print('Done')
         
         # 添加环境（地板和背景光源）
         if add_environment:
