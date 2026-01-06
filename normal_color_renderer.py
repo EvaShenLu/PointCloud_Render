@@ -26,7 +26,6 @@ class NormalColorRenderer:
             image_width: 图像宽度
             image_height: 图像高度
             samples: 采样数
-            render_batch_size: 分批渲染的每批粒子数（默认20000，None表示不分批）
         """
         self.file_path = file_path
         self.folder, full_filename = os.path.split(file_path)
@@ -37,7 +36,7 @@ class NormalColorRenderer:
         self.image_width = image_width
         self.image_height = image_height
         self.samples = samples
-        self.render_batch_size = render_batch_size  # None=不分批, >0=每批粒子数（默认20000）
+        self.render_batch_size = render_batch_size  # None=不分批, >0=每批粒子数
         
     @staticmethod
     def init_mitsuba_variant():
@@ -209,22 +208,13 @@ class NormalColorRenderer:
             }
         }
         
-        # 使用instancing：创建一个shapegroup包含模板sphere，然后用N个instance复制
+        # 批量创建粒子shapes
+        # 直接创建所有shapes，Mitsuba会优化内存使用
         num_points = len(positions)
         
-        print(f'    Creating sphere shapegroup and {num_points:,} instances...', flush=True)
+        # 直接构建所有粒子shapes到场景字典
+        print(f'    Creating {num_points:,} particle shapes...', flush=True)
         
-        # 创建shapegroup（包含模板sphere，共享几何体）
-        scene_dict['particle_shapegroup'] = {
-            'type': 'shapegroup',
-            'id': 'particle_group',
-            'shape': {
-                'type': 'sphere',
-                'radius': radius
-            }
-        }
-        
-        # 创建所有粒子instances
         # 分批添加到场景字典，避免一次性创建太多键
         batch_size = 50000  # 每批处理50000个粒子
         total_batches = (num_points + batch_size - 1) // batch_size
@@ -237,12 +227,9 @@ class NormalColorRenderer:
             
             for local_idx, (pos, color) in enumerate(zip(batch_positions, batch_colors)):
                 global_idx = batch_start + local_idx
-                # 创建instance，引用shapegroup，但使用不同的变换和BSDF
-                scene_dict[f'particle_instance_{global_idx}'] = {
-                    'type': 'instance',
-                    'shapegroup': {
-                        'id': 'particle_group'
-                    },
+                scene_dict[f'particle_{global_idx}'] = {
+                    'type': 'sphere',
+                    'radius': radius,
                     'to_world': mi.ScalarTransform4f.translate(pos.tolist()),
                     'bsdf': {
                         'type': 'diffuse',
@@ -257,11 +244,11 @@ class NormalColorRenderer:
             current_progress = int((batch_idx + 1) * 100 / total_batches)
             if current_progress != last_progress:
                 particles_created = min(batch_end, num_points)
-                print(f'      Progress: {particles_created:,}/{num_points:,} instances ({current_progress}%)', 
+                print(f'      Progress: {particles_created:,}/{num_points:,} particles ({current_progress}%)', 
                       end='\r', flush=True)
                 last_progress = current_progress
         
-        print(f'      Progress: {num_points:,}/{num_points:,} instances (100%) - Done!', flush=True)
+        print(f'      Progress: {num_points:,}/{num_points:,} particles (100%) - Done!', flush=True)
         
         # 创建地面
         floor_z = bbox_min[2] - bbox_size * 0.1
@@ -410,24 +397,12 @@ class NormalColorRenderer:
             # 创建当前批次的场景
             scene_dict = base_scene_dict.copy()
             
-            # 创建shapegroup（每批共享）
-            scene_dict['particle_shapegroup'] = {
-                'type': 'shapegroup',
-                'id': 'particle_group',
-                'shape': {
-                    'type': 'sphere',
-                    'radius': radius
-                }
-            }
-            
-            # 添加当前批次的粒子instances
+            # 添加当前批次的粒子
             for local_idx, (pos, color) in enumerate(zip(batch_positions, batch_colors)):
                 global_idx = batch_start + local_idx
-                scene_dict[f'particle_instance_{local_idx}'] = {
-                    'type': 'instance',
-                    'shapegroup': {
-                        'id': 'particle_group'
-                    },
+                scene_dict[f'particle_{local_idx}'] = {
+                    'type': 'sphere',
+                    'radius': radius,
                     'to_world': mi.ScalarTransform4f.translate(pos.tolist()),
                     'bsdf': {
                         'type': 'diffuse',
