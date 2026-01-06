@@ -54,7 +54,7 @@ class NormalColorRenderer:
                 return False
     
     def load_point_cloud(self):
-        """加载PLY文件，返回位置和法向量"""
+        """加载PLY文件，返回位置、法向量和批次索引"""
         file_extension = os.path.splitext(self.file_path)[1]
         
         if file_extension == '.ply':
@@ -78,7 +78,14 @@ class NormalColorRenderer:
             except (KeyError, ValueError) as e:
                 raise ValueError(f'PLY file does not contain normal vectors (nx, ny, nz): {e}')
             
-            return positions, normals
+            # 读取批次索引
+            try:
+                batch_indices = vertex_data['batch_idx'].astype(np.int32)
+            except (KeyError, ValueError):
+                # 如果没有batch_idx字段，返回None
+                batch_indices = None
+            
+            return positions, normals, batch_indices
         else:
             raise ValueError(f'Unsupported file format: {file_extension}')
     
@@ -234,7 +241,7 @@ class NormalColorRenderer:
             }
         }
     
-    def build_scene(self, positions, colors, radius):
+    def build_scene(self, positions, colors, radius, bbox_min=None, bbox_max=None, center=None, bbox_size=None):
         """
         使用Mitsuba Python API构建场景，优化大量粒子的渲染
         
@@ -242,15 +249,23 @@ class NormalColorRenderer:
             positions: (N, 3) 位置数组
             colors: (N, 3) RGB颜色数组
             radius: 粒子半径
+            bbox_min: 边界框最小值（可选，用于分批渲染时保持场景一致）
+            bbox_max: 边界框最大值（可选，用于分批渲染时保持场景一致）
+            center: 点云中心（可选，用于分批渲染时保持场景一致）
+            bbox_size: 边界框大小（可选，用于分批渲染时保持场景一致）
             
         Returns:
             scene: Mitsuba场景对象
         """
         # 计算点云边界框以设置合适的相机位置
-        bbox_min = np.min(positions, axis=0)
-        bbox_max = np.max(positions, axis=0)
-        center = (bbox_min + bbox_max) / 2.0
-        bbox_size = np.max(bbox_max - bbox_min)
+        if bbox_min is None:
+            bbox_min = np.min(positions, axis=0)
+        if bbox_max is None:
+            bbox_max = np.max(positions, axis=0)
+        if center is None:
+            center = (bbox_min + bbox_max) / 2.0
+        if bbox_size is None:
+            bbox_size = np.max(bbox_max - bbox_min)
         
         # 相机位置：在点云上方和侧面
         camera_distance = bbox_size * 2.5
@@ -308,15 +323,18 @@ class NormalColorRenderer:
         print('Done')
         return scene
     
-    def render(self, positions, normals):
+    def render(self, positions, normals, batch_indices=None, use_batch_rendering=False):
         """
         渲染点云
         
         使用merge shape优化，一次性渲染所有粒子，性能比独立shape快>100倍。
+        如果指定use_batch_rendering=True且batch_indices不为None，则按batch_idx分批渲染。
         
         Args:
             positions: (N, 3) 位置数组
             normals: (N, 3) 法向量数组
+            batch_indices: (N,) 批次索引数组（可选）
+            use_batch_rendering: 是否使用分批渲染（基于batch_idx）
             
         Returns:
             image: 渲染的图像
@@ -339,14 +357,26 @@ class NormalColorRenderer:
             radius = self.particle_radius
         print('Done')
         
+        # 计算全局边界框（用于保持场景一致性）
+        bbox_min = np.min(positions_std, axis=0)
+        bbox_max = np.max(positions_std, axis=0)
+        bbox_center = (bbox_min + bbox_max) / 2.0
+        bbox_size = np.max(bbox_max - bbox_min)
+        
+        # 如果使用分批渲染且batch_indices可用
+        if use_batch_rendering and batch_indices is not None:
+            # 检查是否有single_batch参数（通过实例变量传递）
+            single_batch_id = getattr(self, '_single_batch_id', None)
+            return self._render_batched_by_batch_idx(
+                positions_std, colors, radius, batch_indices,
+                bbox_min, bbox_max, bbox_center, bbox_size,
+                single_batch_id=single_batch_id
+            )
+        
         # 一次性渲染所有粒子
         # 注意：使用merge shape优化后，一次性渲染已经非常高效（比独立shape快>100倍）
-        # 分批渲染会导致以下问题：
-        # 1. 每个批次都会重新渲染背景和地板，导致不一致
-        # 2. 使用最大值合并图像会导致视觉伪影
-        # 3. 实际上并不能真正减少内存压力，因为每次渲染仍需要完整场景
-        # 因此，我们使用一次性渲染，merge shape已经优化了性能
-        scene = self.build_scene(positions_std, colors, radius)
+        scene = self.build_scene(positions_std, colors, radius, 
+                                bbox_min, bbox_max, bbox_center, bbox_size)
         
         # 渲染场景，使用进度回调显示进度
         print('  Rendering scene (this may take a while)...', flush=True)
@@ -374,6 +404,88 @@ class NormalColorRenderer:
         
         return image
     
+    def _render_batched_by_batch_idx(self, positions, colors, radius, batch_indices,
+                                     bbox_min, bbox_max, center, bbox_size,
+                                     single_batch_id=None):
+        """
+        按batch_idx分批渲染点云
+        
+        Args:
+            positions: (N, 3) 标准化后的位置数组
+            colors: (N, 3) RGB颜色数组
+            radius: 粒子半径
+            batch_indices: (N,) 批次索引数组
+            bbox_min: 全局边界框最小值
+            bbox_max: 全局边界框最大值
+            center: 全局中心点
+            bbox_size: 全局边界框大小
+            single_batch_id: 如果指定，只渲染这个batch ID（用于测试）
+            
+        Returns:
+            image: 合并后的渲染图像
+        """
+        # 获取唯一的批次ID并排序
+        unique_batches = np.unique(batch_indices)
+        unique_batches = np.sort(unique_batches)
+        
+        # 如果指定了single_batch_id，只渲染该batch
+        if single_batch_id is not None:
+            if single_batch_id not in unique_batches:
+                raise ValueError(f'Batch ID {single_batch_id} not found. Available batch IDs: {unique_batches[0]} to {unique_batches[-1]}')
+            unique_batches = [single_batch_id]
+            print(f'  Rendering single batch {single_batch_id} (test mode)...')
+        else:
+            num_batches = len(unique_batches)
+            print(f'  Rendering {num_batches} batches (batch size: {len(positions) // num_batches} particles per batch)...')
+        
+        # 初始化累积图像（使用alpha混合）
+        accumulated_image = None
+        
+        # 按批次渲染
+        for batch_idx, batch_id in enumerate(unique_batches):
+            # 获取当前批次的粒子索引
+            batch_mask = batch_indices == batch_id
+            batch_positions = positions[batch_mask]
+            batch_colors = colors[batch_mask]
+            num_batch_particles = len(batch_positions)
+            
+            print(f'    Batch {batch_id} ({batch_idx + 1}/{num_batches}): {num_batch_particles:,} particles...', 
+                  end=' ', flush=True)
+            
+            # 为当前批次构建场景（使用全局边界框保持一致性）
+            scene = self.build_scene(batch_positions, batch_colors, radius,
+                                    bbox_min, bbox_max, center, bbox_size)
+            
+            # 渲染当前批次
+            batch_image = mi.render(scene)
+            
+            # 转换为numpy数组以便处理
+            batch_image_np = mi.util.convert_to_bitmap(batch_image)
+            
+            # 合并图像：使用alpha混合或直接叠加
+            # 对于点云渲染，我们使用简单的叠加（因为粒子是半透明的）
+            if accumulated_image is None:
+                accumulated_image = batch_image_np.copy()
+            else:
+                # 叠加：新图像覆盖旧图像（点云粒子会自然混合）
+                # 使用最大值混合，保留最亮的像素
+                accumulated_image = np.maximum(accumulated_image, batch_image_np)
+            
+            # 清理场景和图像
+            del scene, batch_image, batch_image_np
+            import gc
+            gc.collect()
+            
+            print('Done')
+        
+        # 转换回Mitsuba图像格式
+        # 使用 mi.Bitmap 将numpy数组转换为Mitsuba图像格式
+        bitmap = mi.Bitmap(accumulated_image)
+        final_image = bitmap.convert(mi.Bitmap.PixelFormat.RGB, mi.Struct.Type.Float32, False)
+        
+        print('  All batches rendered and merged')
+        return final_image
+    
     
     def save_image(self, output_file_path, image):
         """
@@ -385,13 +497,23 @@ class NormalColorRenderer:
         """
         mi.util.write_bitmap(f'{output_file_path}.png', image)
     
-    def process(self):
-        """处理单帧点云"""
+    def process(self, use_batch_rendering=False, single_batch_id=None):
+        """
+        处理单帧点云
+        
+        Args:
+            use_batch_rendering: 是否使用基于batch_idx的分批渲染
+            single_batch_id: 如果指定，只渲染这个batch ID（用于测试）
+        """
+        # 如果指定了single_batch_id，设置实例变量
+        if single_batch_id is not None:
+            self._single_batch_id = single_batch_id
+        
         # 加载点云
-        positions, normals = self.load_point_cloud()
+        positions, normals, batch_indices = self.load_point_cloud()
         
         # 渲染
-        image = self.render(positions, normals)
+        image = self.render(positions, normals, batch_indices, use_batch_rendering)
         
         # 保存
         if self.output_folder:
@@ -413,7 +535,9 @@ def batch_render(input_folder='trajectory_ply',
                  image_width=1920,
                  image_height=1080,
                  samples=256,
-                 num_workers=1):
+                 num_workers=1,
+                 use_batch_rendering=False,
+                 single_batch_id=None):
     """
     批量渲染PLY文件
     
@@ -427,6 +551,8 @@ def batch_render(input_folder='trajectory_ply',
         image_height: 图像高度
         samples: 采样数
         num_workers: 并行工作进程数（1表示单进程，>1需要多进程支持）
+        use_batch_rendering: 是否使用基于batch_idx的分批渲染
+        single_batch_id: 如果指定，只渲染这个batch ID（用于测试，需要use_batch_rendering=True）
     """
     import glob
     
@@ -501,8 +627,9 @@ def batch_render(input_folder='trajectory_ply',
                         samples=samples
                     )
                     
-                    positions, normals = renderer.load_point_cloud()
-                    image = renderer.render(positions, normals)
+                    positions, normals, batch_indices = renderer.load_point_cloud()
+                    renderer._single_batch_id = single_batch_id if use_batch_rendering else None
+                    image = renderer.render(positions, normals, batch_indices, use_batch_rendering)
                     renderer.save_image(
                         os.path.join(output_folder, renderer.filename),
                         image
@@ -562,11 +689,12 @@ def batch_render(input_folder='trajectory_ply',
                 
                 # 加载点云
                 print('  Loading point cloud...', end=' ', flush=True)
-                positions, normals = renderer.load_point_cloud()
+                positions, normals, batch_indices = renderer.load_point_cloud()
                 print(f'Done ({len(positions):,} points)')
                 
                 # 处理和渲染
-                image = renderer.render(positions, normals)
+                renderer._single_batch_id = single_batch_id if use_batch_rendering else None
+                image = renderer.render(positions, normals, batch_indices, use_batch_rendering)
                 
                 # 保存图像
                 print('  Saving image...', end=' ', flush=True)
@@ -618,7 +746,16 @@ if __name__ == '__main__':
                         help='Samples per pixel')
     parser.add_argument('--workers', type=int, default=1,
                         help='Number of parallel workers (multiprocessing)')
+    parser.add_argument('--use-batch-rendering', action='store_true',
+                        help='Use batch_idx-based batch rendering (256 batches, 2048 particles each)')
+    parser.add_argument('--single-batch', type=int, default=None,
+                        help='Render only a single batch ID (0-255) for testing (requires --use-batch-rendering)')
     args = parser.parse_args()
+    
+    # 验证参数
+    if args.single_batch is not None and not args.use_batch_rendering:
+        print('Warning: --single-batch requires --use-batch-rendering. Ignoring --single-batch.')
+        args.single_batch = None
     
     batch_render(
         input_folder=args.input,
@@ -629,6 +766,8 @@ if __name__ == '__main__':
         image_width=args.width,
         image_height=args.height,
         samples=args.samples,
-        num_workers=args.workers
+        num_workers=args.workers,
+        use_batch_rendering=args.use_batch_rendering,
+        single_batch_id=args.single_batch
     )
 
