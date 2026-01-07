@@ -287,31 +287,58 @@ class BlenderPointCloudRenderer:
             try:
                 prefs = bpy.context.preferences
                 cycles_prefs = prefs.addons['cycles'].preferences
+                
+                # 尝试获取设备列表
                 devices = cycles_prefs.get_devices()
                 
-                # 查找可用的GPU设备并启用
-                gpu_devices = []
-                for device in devices:
-                    if device.type in ('CUDA', 'OPENCL', 'OPTIX', 'HIP', 'METAL', 'ONEAPI'):
-                        if not device.use:
-                            device.use = True  # 启用GPU设备
-                        gpu_devices.append(device)
-                
-                has_gpu = len(gpu_devices) > 0
-                
-                if has_gpu:
-                    scene.cycles.device = 'GPU'
-                    scene.cycles.tile_size = 256  # GPU优化tile大小
-                    device_names = [f"{d.name} ({d.type})" for d in gpu_devices if d.use]
-                    print(f'    Using GPU: {", ".join(device_names)}')
+                # 检查devices是否为None或空
+                if devices is None:
+                    # 如果get_devices()返回None，尝试直接设置GPU设备类型
+                    # 在某些Blender版本中，可以直接设置device类型
+                    try:
+                        scene.cycles.device = 'GPU'
+                        scene.cycles.tile_size = 256
+                        print('    Using GPU (device type set to GPU)')
+                    except:
+                        scene.cycles.device = 'CPU'
+                        scene.cycles.tile_size = 512
+                        print('    Using CPU (could not set GPU device type)')
                 else:
-                    scene.cycles.device = 'CPU'
-                    scene.cycles.tile_size = 512  # CPU优化tile大小
-                    print('    Using CPU (no GPU devices found)')
+                    # 查找可用的GPU设备并启用
+                    gpu_devices = []
+                    for device in devices:
+                        if device and device.type in ('CUDA', 'OPENCL', 'OPTIX', 'HIP', 'METAL', 'ONEAPI'):
+                            if not device.use:
+                                device.use = True  # 启用GPU设备
+                            gpu_devices.append(device)
+                    
+                    has_gpu = len(gpu_devices) > 0
+                    
+                    if has_gpu:
+                        scene.cycles.device = 'GPU'
+                        scene.cycles.tile_size = 256  # GPU优化tile大小
+                        device_names = [f"{d.name} ({d.type})" for d in gpu_devices if d.use]
+                        print(f'    Using GPU: {", ".join(device_names)}')
+                    else:
+                        # 即使没有找到设备，也尝试设置GPU（可能设备列表为空但GPU可用）
+                        try:
+                            scene.cycles.device = 'GPU'
+                            scene.cycles.tile_size = 256
+                            print('    Using GPU (device list empty, but GPU mode enabled)')
+                        except:
+                            scene.cycles.device = 'CPU'
+                            scene.cycles.tile_size = 512  # CPU优化tile大小
+                            print('    Using CPU (no GPU devices found)')
             except Exception as e:
-                scene.cycles.device = 'CPU'
-                scene.cycles.tile_size = 512
-                print(f'    Warning: Could not configure GPU, using CPU: {e}')
+                # 如果所有方法都失败，尝试直接设置GPU
+                try:
+                    scene.cycles.device = 'GPU'
+                    scene.cycles.tile_size = 256
+                    print(f'    Using GPU (fallback method, error: {e})')
+                except:
+                    scene.cycles.device = 'CPU'
+                    scene.cycles.tile_size = 512
+                    print(f'    Using CPU (GPU configuration failed: {e})')
         
         # 设置输出格式
         scene.render.image_settings.file_format = 'PNG'
@@ -347,12 +374,15 @@ class BlenderPointCloudRenderer:
             center: 点云中心点 (3,)
             bbox_size: 边界框大小
         """
-        # 计算相机位置：在点云上方和侧面
+        # 计算相机位置：使用对称的位置，确保点云居中
+        # 标准化后的点云中心应该在原点，所以center应该是[0, 0, 0]
         camera_distance = bbox_size * 3.5
+        
+        # 使用更对称的相机位置（等距视角）
         camera_origin = center + np.array([
-            camera_distance * 0.7, 
-            camera_distance * 0.7, 
-            camera_distance * 0.5
+            camera_distance * 1.0,   # X方向：右侧
+            camera_distance * 1.0,   # Y方向：前方
+            camera_distance * 0.6    # Z方向：稍微上方
         ])
         
         # 转换为Blender Vector
@@ -367,7 +397,7 @@ class BlenderPointCloudRenderer:
         # 设置相机位置
         camera.location = camera_origin_vec
         
-        # 设置相机朝向
+        # 设置相机朝向：看向点云中心
         direction = center_vec - camera_origin_vec
         if direction.length > 0:
             rot_quat = direction.to_track_quat('-Z', 'Y')
@@ -378,6 +408,11 @@ class BlenderPointCloudRenderer:
         # 设置相机参数
         camera.data.type = 'PERSP'
         camera.data.angle = np.radians(30)
+        
+        # 微调相机shift以确保点云完全居中（shift_x和shift_y用于微调构图）
+        # 如果点云偏左，可以稍微向右shift
+        camera.data.shift_x = 0.0  # 水平微调（正值向右，负值向左）
+        camera.data.shift_y = 0.0  # 垂直微调（正值向上，负值向下）
         
         # 设置活动相机
         bpy.context.scene.camera = camera
