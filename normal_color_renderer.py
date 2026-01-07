@@ -14,7 +14,7 @@ class NormalColorRenderer:
     def __init__(self, file_path, output_folder=None, 
                  particle_radius=None, 
                  image_width=1920, image_height=1080,
-                 samples=256):
+                 samples=64):
         """
         初始化渲染器
         
@@ -204,7 +204,7 @@ class NormalColorRenderer:
     @staticmethod
     def compute_adaptive_radius(positions):
         """
-        根据点云计算自适应粒子半径
+        根据点云计算自适应粒子半径（优化：使用更小的半径以提升渲染速度）
         
         Args:
             positions: (N, 3) 位置数组
@@ -219,11 +219,11 @@ class NormalColorRenderer:
         
         # 根据点云密度计算半径
         # 使用立方根来估算合适的粒子大小
-        point_density = num_points / (bbox_size ** 3 + 1e-8)
-        radius = bbox_size / (num_points ** 0.33) * 0.15
+        # 减小系数以使用更小的半径（提升渲染速度）
+        radius = bbox_size / (num_points ** 0.33) * 0.12  # 从0.15降到0.12
         
-        # 限制在合理范围内
-        radius = max(0.005, min(radius, 0.02))
+        # 限制在合理范围内（稍微减小上限以提升速度）
+        radius = max(0.003, min(radius, 0.015))  # 从0.02降到0.015
         
         return radius
     
@@ -269,7 +269,8 @@ class NormalColorRenderer:
         return {
             'type': 'scene',
             'integrator': {
-                'type': 'direct'  # 使用direct积分器，极速渲染，只计算直接光照
+                'type': 'path',
+                'max_depth': 2  # 使用较低的深度以提升渲染速度
             },
             'sensor': {
                 'type': 'perspective',
@@ -283,10 +284,10 @@ class NormalColorRenderer:
                     'type': 'hdrfilm',
                     'width': self.image_width,
                     'height': self.image_height,
-                    'rfilter': {'type': 'gaussian'}
+                    'rfilter': {'type': 'box'}  # 使用box filter，比gaussian快
                 },
                 'sampler': {
-                    'type': 'independent',
+                    'type': 'independent',  # Mitsuba 3标准采样器
                     'sample_count': self.samples
                 }
             }
@@ -421,8 +422,10 @@ end_header
         # 构建XML头部
         xml_parts = ['<scene version="0.6.0">']
         
-        # 积分器 (使用direct积分器，极速渲染，只计算直接光照)
-        xml_parts.append('    <integrator type="direct"/>')
+        # 积分器 (使用path积分器，较低的max_depth以提升渲染速度)
+        xml_parts.append('    <integrator type="path">')
+        xml_parts.append('        <integer name="maxDepth" value="2"/>')
+        xml_parts.append('    </integrator>')
         
         # 传感器（相机）
         xml_parts.append('    <sensor type="perspective">')
@@ -434,8 +437,10 @@ end_header
         xml_parts.append('        <film type="hdrfilm">')
         xml_parts.append(f'            <integer name="width" value="{self.image_width}"/>')
         xml_parts.append(f'            <integer name="height" value="{self.image_height}"/>')
-        xml_parts.append('            <rfilter type="gaussian"/>')
+        # 使用box filter（比gaussian快，虽然质量略低但速度更快）
+        xml_parts.append('            <rfilter type="box"/>')
         xml_parts.append('        </film>')
+        # 使用independent采样器（Mitsuba 3标准）
         xml_parts.append('        <sampler type="independent">')
         xml_parts.append(f'            <integer name="sampleCount" value="{self.samples}"/>')
         xml_parts.append('        </sampler>')
@@ -782,7 +787,7 @@ def batch_render(input_folder='trajectory_ply',
                  end_frame=None,
                  image_width=1920,
                  image_height=1080,
-                 samples=256,
+                 samples=64,
                  use_batch_rendering=False,
                  single_batch_id=None,
                  max_batches=None):
@@ -919,8 +924,8 @@ if __name__ == '__main__':
                         help='Image width')
     parser.add_argument('--height', type=int, default=1080,
                         help='Image height')
-    parser.add_argument('--samples', type=int, default=256,
-                        help='Samples per pixel')
+    parser.add_argument('--samples', type=int, default=64,
+                        help='Samples per pixel (default: 64 for faster rendering)')
     parser.add_argument('--use-batch-rendering', action='store_true',
                         help='Use batch_idx-based batch rendering (256 batches, 2048 particles each)')
     parser.add_argument('--single-batch', type=int, default=None,
