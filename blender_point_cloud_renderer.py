@@ -22,7 +22,7 @@ class BlenderPointCloudRenderer:
                  particle_radius=None, 
                  image_width=1920, image_height=1080,
                  samples=64, engine='cycles', max_points=None,
-                 particle_color=(1.0, 1.0, 1.0)):
+                 particle_color=(0.3, 0.3, 0.3)):
         """
         初始化渲染器
         
@@ -35,7 +35,7 @@ class BlenderPointCloudRenderer:
             samples: 采样数（Cycles渲染引擎）
             engine: 渲染引擎 ('cycles' 或 'eevee')
             max_points: 最大点数（None表示不限制，用于LOD降采样）
-            particle_color: 粒子颜色 (R, G, B)，范围[0, 1]，默认白色
+            particle_color: 粒子颜色 (R, G, B)，范围[0, 1]，默认灰色(0.3, 0.3, 0.3)
         """
         if not BPY_AVAILABLE:
             raise RuntimeError("bpy is not available. Please run this script within Blender or via 'blender --python' command.")
@@ -738,7 +738,7 @@ def batch_render(input_folder='trajectory_ply',
                  single_batch_id=None,
                  max_batches=None,
                  max_points=None,
-                 particle_color=(1.0, 1.0, 1.0)):
+                 particle_color=(0.3, 0.3, 0.3)):
     """
     批量渲染PLY文件（需要在Blender环境中运行）
     
@@ -757,7 +757,7 @@ def batch_render(input_folder='trajectory_ply',
         single_batch_id: 如果指定，只渲染这个batch ID（用于测试，需要use_batch_rendering=True）
         max_batches: 如果指定，最多渲染这么多batch（用于测试，需要use_batch_rendering=True）
         max_points: 最大点数（LOD降采样）
-        particle_color: 粒子颜色 (R, G, B)，范围[0, 1]，默认白色
+        particle_color: 粒子颜色 (R, G, B)，范围[0, 1]，默认灰色(0.3, 0.3, 0.3)
     """
     import glob
     
@@ -904,9 +904,9 @@ if __name__ == '__main__':
                         help='Maximum number of batches to render (requires --use-batch-rendering)')
     parser.add_argument('--max-points', type=int, default=None,
                         help='Maximum number of points to render (LOD downsampling, None=no limit)')
-    parser.add_argument('--color', type=float, nargs=3, default=[1.0, 1.0, 1.0],
+    parser.add_argument('--color', type=float, nargs=3, default=[0.3, 0.3, 0.3],
                         metavar=('R', 'G', 'B'),
-                        help='Particle color RGB values (0.0-1.0, default: 1.0 1.0 1.0 for white)')
+                        help='Particle color RGB values (0.0-1.0, default: 0.3 0.3 0.3 for gray)')
     args = parser.parse_args()
     
     # 验证参数
