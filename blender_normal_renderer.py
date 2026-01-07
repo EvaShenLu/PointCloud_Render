@@ -21,7 +21,7 @@ class BlenderNormalRenderer:
     def __init__(self, file_path, output_folder=None, 
                  particle_radius=None, 
                  image_width=1920, image_height=1080,
-                 samples=64, engine='cycles'):
+                 samples=64, engine='cycles', max_points=None):
         """
         初始化渲染器
         
@@ -33,6 +33,7 @@ class BlenderNormalRenderer:
             image_height: 图像高度
             samples: 采样数（Cycles渲染引擎）
             engine: 渲染引擎 ('cycles' 或 'eevee')
+            max_points: 最大点数（None表示不限制，用于LOD降采样）
         """
         if not BPY_AVAILABLE:
             raise RuntimeError("bpy is not available. Please run this script within Blender or via 'blender --python' command.")
@@ -47,6 +48,7 @@ class BlenderNormalRenderer:
         self.image_height = image_height
         self.samples = samples
         self.engine = engine.lower()
+        self.max_points = max_points  # LOD降采样目标点数
         
         if self.engine not in ['cycles', 'eevee']:
             raise ValueError(f"Unsupported engine: {engine}. Must be 'cycles' or 'eevee'")
@@ -86,7 +88,7 @@ class BlenderNormalRenderer:
     @staticmethod
     def _read_ply_binary_fast(file_path, num_vertices, header_size):
         """
-        使用np.fromfile快速读取PLY二进制数据（跳过Python解析开销）
+        使用np.fromfile快速读取PLY二进制数据
         
         Args:
             file_path: PLY文件路径
@@ -98,7 +100,6 @@ class BlenderNormalRenderer:
             normals: (N, 3) 法向量数组
             batch_indices: (N,) 批次索引数组或None
         """
-        # 定义顶点数据结构：x(4) + y(4) + z(4) + nx(4) + ny(4) + nz(4) + batch_idx(4) = 28字节
         dtype = np.dtype([
             ('x', '<f4'),      # little-endian float32
             ('y', '<f4'),
@@ -106,10 +107,10 @@ class BlenderNormalRenderer:
             ('nx', '<f4'),
             ('ny', '<f4'),
             ('nz', '<f4'),
-            ('batch_idx', '<i4')  # little-endian int32
+            ('batch_idx', '<i4')
         ])
         
-        # 直接从文件读取二进制数据（跳过header）
+        # 读取二进制数据
         with open(file_path, 'rb') as f:
             f.seek(header_size)  # 跳过header
             data = np.fromfile(f, dtype=dtype, count=num_vertices)
@@ -124,15 +125,11 @@ class BlenderNormalRenderer:
     def load_point_cloud(self):
         """
         加载PLY文件，返回位置、法向量和批次索引
-        使用优化的二进制读取方法，跳过Python解析开销
         """
         file_extension = os.path.splitext(self.file_path)[1]
         
         if file_extension == '.ply':
-            # 快速读取：先读header获取信息
             num_vertices, header_size = self._read_ply_header_fast(self.file_path)
-            
-            # 使用np.fromfile直接读取二进制数据（比PlyData.read快得多）
             positions, normals, batch_indices = self._read_ply_binary_fast(
                 self.file_path, num_vertices, header_size
             )
@@ -144,7 +141,7 @@ class BlenderNormalRenderer:
     @staticmethod
     def normal_to_rgb(normals):
         """
-        将法向量映射到RGB颜色（优化版本）
+        将法向量映射到RGB颜色
         
         Args:
             normals: (N, 3) 法向量数组
@@ -152,21 +149,41 @@ class BlenderNormalRenderer:
         Returns:
             rgb: (N, 3) RGB颜色数组，范围[0, 1]
         """
-        # 归一化法向量（使用更高效的向量化操作）
-        # 使用平方和开方，避免重复计算
+        # 归一化法向量
         norms = np.sqrt(np.sum(normals ** 2, axis=1, keepdims=True))
         normalized = normals / (norms + 1e-8)
         
-        # 映射到[0, 1]范围: (normal + 1) / 2
+        # 映射到[0, 1]范围
         rgb = (normalized + 1.0) * 0.5
-        
-        # 确保值在[0, 1]范围内（clip比条件判断快）
         return np.clip(rgb, 0.0, 1.0)
+    
+    @staticmethod
+    def downsample_points(positions, normals, target_points=50000):
+        """
+        降采样点云以提升渲染性能（LOD）
+        
+        Args:
+            positions: (N, 3) 位置数组
+            normals: (N, 3) 法向量数组
+            target_points: 目标点数
+            
+        Returns:
+            downsampled_positions: 降采样后的位置
+            downsampled_normals: 降采样后的法向量
+        """
+        if len(positions) <= target_points:
+            return positions, normals
+        
+        # 均匀采样
+        step = len(positions) // target_points
+        indices = np.arange(0, len(positions), step)
+        
+        return positions[indices], normals[indices]
     
     @staticmethod
     def compute_adaptive_radius(positions):
         """
-        根据点云计算自适应粒子半径（优化：使用更小的半径以提升渲染速度）
+        根据点云计算自适应粒子半径
         
         Args:
             positions: (N, 3) 位置数组
@@ -179,20 +196,15 @@ class BlenderNormalRenderer:
         bbox_size = np.max(bbox_max - bbox_min)
         num_points = len(positions)
         
-        # 根据点云密度计算半径
-        # 使用立方根来估算合适的粒子大小
-        # 减小系数以使用更小的半径（提升渲染速度）
-        radius = bbox_size / (num_points ** 0.33) * 0.12  # 从0.15降到0.12
-        
-        # 限制在合理范围内（稍微减小上限以提升速度）
-        radius = max(0.003, min(radius, 0.015))  # 从0.02降到0.015
+        radius = bbox_size / (num_points ** 0.33) * 0.20  # 进一步增加系数以放大粒子
+        radius = max(0.005, min(radius, 0.025))  # 进一步增加最小和最大半径限制
         
         return radius
     
     @staticmethod
     def standardize_point_cloud(positions):
         """
-        标准化点云：居中并缩放到单位范围（优化版本）
+        标准化点云：居中并缩放到单位范围
         
         Args:
             positions: (N, 3) 位置数组
@@ -202,12 +214,10 @@ class BlenderNormalRenderer:
             center: 原始中心
             scale: 原始缩放
         """
-        # 使用更高效的计算方式
         center = np.mean(positions, axis=0, dtype=np.float32)
         positions_centered = positions - center
         scale = np.max(np.abs(positions_centered))
         
-        # 避免除法，使用乘法（更快）
         if scale > 1e-8:
             inv_scale = 1.0 / scale
             standardized = positions_centered * inv_scale
@@ -228,6 +238,12 @@ class BlenderNormalRenderer:
         scene = bpy.context.scene
         scene.render.engine = self.engine.upper()
         
+        # 调整曝光以提升整体亮度（Cycles和Eevee都支持）
+        if hasattr(scene.view_settings, 'exposure'):
+            scene.view_settings.exposure = 0.5  # 增加曝光值
+        if hasattr(scene.view_settings, 'gamma'):
+            scene.view_settings.gamma = 1.2  # 稍微提升gamma
+        
         # 设置渲染分辨率
         scene.render.resolution_x = self.image_width
         scene.render.resolution_y = self.image_height
@@ -235,11 +251,42 @@ class BlenderNormalRenderer:
         
         # 设置渲染采样数（仅Cycles）
         if self.engine == 'cycles':
-            scene.cycles.samples = self.samples
-            scene.cycles.use_denoising = True  # 启用降噪以提升质量
+            # 降低采样数以提升性能（默认使用传入的samples，但可以进一步优化）
+            scene.cycles.samples = min(self.samples, 32)  # 限制最大采样数为32
+            
+            # 使用自适应采样
+            scene.cycles.use_adaptive_sampling = True
+            scene.cycles.adaptive_threshold = 0.05
+            
+            # 关闭降噪以提升性能（渲染后处理开销）
+            scene.cycles.use_denoising = False
+            
+            # 简化光线追踪：对于点云，光线弹射1次足够
+            scene.cycles.max_bounces = 1
+            scene.cycles.diffuse_bounces = 0
+            scene.cycles.glossy_bounces = 0
+            scene.cycles.transparent_max_bounces = 1
+            scene.cycles.transmission_bounces = 0
+            
+            # 关闭Caustics（焦散）- 点云不需要，可以提升性能
+            scene.cycles.caustics_reflective = False
+            scene.cycles.caustics_refractive = False
+            
+            # 启用快速GI近似
+            scene.cycles.use_fast_gi = True
+            scene.cycles.fast_gi_method = 'REPLACE'
+            
+            # 使用Persistent Data（如果显存足够，保持静态BVH数据）
+            scene.cycles.use_persistent_data = True
+            
+            # 优化tile大小（GPU建议256或512）
+            scene.cycles.tile_size = 256
+            
+            # 简化视口预览
+            scene.cycles.preview_samples = 16
+            
             # 使用GPU加速（如果可用）
             try:
-                # 检查是否有GPU设备可用
                 prefs = bpy.context.preferences
                 cycles_prefs = prefs.addons['cycles'].preferences
                 devices = cycles_prefs.get_devices()
@@ -247,7 +294,6 @@ class BlenderNormalRenderer:
                              for device in devices if device.use)
                 scene.cycles.device = 'GPU' if has_gpu else 'CPU'
             except:
-                # 如果无法检测GPU，默认使用CPU
                 scene.cycles.device = 'CPU'
         
         # 设置输出格式
@@ -255,7 +301,10 @@ class BlenderNormalRenderer:
         scene.render.image_settings.color_mode = 'RGB'
         scene.render.image_settings.color_depth = '16'
         
-        # 设置世界背景为黑色
+        # 禁用不必要的功能以提升性能
+        scene.render.use_motion_blur = False  # 关闭运动模糊
+        
+        # 设置世界背景
         world = scene.world
         if world is None:
             world = bpy.data.worlds.new("World")
@@ -266,6 +315,10 @@ class BlenderNormalRenderer:
             bg = world.node_tree.nodes.new("ShaderNodeBackground")
         bg.inputs["Color"].default_value = (0.0, 0.0, 0.0, 1.0)  # 黑色背景
         bg.inputs["Strength"].default_value = 0.0
+        
+        # 添加环境光（Cycles）
+        if self.engine == 'cycles':
+            bg.inputs["Strength"].default_value = 1.5  # 增加环境光强度以提升整体亮度
         
         return scene
     
@@ -297,19 +350,17 @@ class BlenderNormalRenderer:
         # 设置相机位置
         camera.location = camera_origin_vec
         
-        # 设置相机朝向（看向点云中心）
+        # 设置相机朝向
         direction = center_vec - camera_origin_vec
         if direction.length > 0:
-            # 使用look_at方法设置相机朝向
             rot_quat = direction.to_track_quat('-Z', 'Y')
             camera.rotation_euler = rot_quat.to_euler()
         else:
-            # 如果方向为零，使用默认朝向
             camera.rotation_euler = (np.radians(90), 0, 0)
         
         # 设置相机参数
         camera.data.type = 'PERSP'
-        camera.data.angle = np.radians(30)  # FOV 30度
+        camera.data.angle = np.radians(30)
         
         # 设置活动相机
         bpy.context.scene.camera = camera
@@ -326,213 +377,49 @@ class BlenderNormalRenderer:
             center: 点云中心点 (3,)
             bbox_size: 边界框大小
         """
-        # 创建地板
+        # 创建白色背景板（地板）
         floor_z = float(bbox_min[2] - bbox_size * 0.1)
         bpy.ops.mesh.primitive_plane_add(
-            size=bbox_size * 5,
+            size=bbox_size * 12,  # 增大背景板尺寸
             location=(float(center[0]), float(center[1]), floor_z)
         )
         floor = bpy.context.active_object
-        floor.name = "Floor"
+        floor.name = "BackgroundFloor"
         
-        # 创建地板材质
-        floor_mat = bpy.data.materials.new(name="FloorMaterial")
+        # 创建白色背景板材质
+        floor_mat = bpy.data.materials.new(name="BackgroundFloorMaterial")
         floor_mat.use_nodes = True
         bsdf = floor_mat.node_tree.nodes.get("Principled BSDF")
         if bsdf:
-            bsdf.inputs["Base Color"].default_value = (1.0, 1.0, 1.0, 1.0)
+            bsdf.inputs["Base Color"].default_value = (1.0, 1.0, 1.0, 1.0)  # 纯白色
             bsdf.inputs["Roughness"].default_value = 0.9
+            bsdf.inputs["Metallic"].default_value = 0.0
         floor.data.materials.append(floor_mat)
         
-        # 创建背景光源（矩形面光源）
-        bg_z = float(center[2] + bbox_size * 2)
-        bpy.ops.mesh.primitive_plane_add(
-            size=bbox_size * 3,
-            location=(float(center[0]), float(center[1]), bg_z)
-        )
-        bg_light = bpy.context.active_object
-        bg_light.name = "BackgroundLight"
-        
-        # 旋转光源使其面向点云
-        bg_light.rotation_euler = (np.radians(90), 0, 0)
-        
-        # 添加发光材质
-        light_mat = bpy.data.materials.new(name="BackgroundLightMaterial")
-        light_mat.use_nodes = True
-        emission = light_mat.node_tree.nodes.get("Emission")
-        if emission is None:
-            emission = light_mat.node_tree.nodes.new("ShaderNodeEmission")
-        emission.inputs["Color"].default_value = (1.0, 1.0, 1.0, 1.0)
-        emission.inputs["Strength"].default_value = 1.8
-        
-        # 连接到输出
-        output = light_mat.node_tree.nodes.get("Material Output")
-        if output:
-            light_mat.node_tree.links.new(emission.outputs["Emission"], output.inputs["Surface"])
-        
-        bg_light.data.materials.append(light_mat)
-        
-        # 设置为发光对象（Eevee需要）
-        if self.engine == 'eevee':
-            bg_light.data.use_auto_smooth = False
+        # 添加顶部光源（环境光已在init_blender_scene中设置）
+        bpy.ops.object.light_add(type='AREA', location=(
+            float(center[0]), 
+            float(center[1]), 
+            float(center[2] + bbox_size * 2)
+        ))
+        top_light = bpy.context.active_object
+        top_light.name = "TopLight"
+        top_light.data.energy = 150.0  # 增加顶部光源亮度
+        top_light.data.size = bbox_size * 1.5
+        top_light.rotation_euler = (0, 0, 0)
     
-    def create_point_cloud_mesh(self, positions, colors, radius):
+    def create_point_cloud_simple(self, positions, normals, radius):
         """
-        使用Geometry Nodes创建点云（高效实例化方法）
+        创建带颜色的点云网格，使用Geometry Nodes实例化
+        每个粒子的RGB颜色直接从PLY文件中读取的normal信息转换而来
         
         Args:
             positions: (N, 3) 位置数组
-            colors: (N, 3) RGB颜色数组，范围[0, 1]
+            normals: (N, 3) 法向量数组（从PLY文件读取）
             radius: 粒子半径
         """
         num_points = len(positions)
-        
-        # 创建基础球体作为实例模板
-        bpy.ops.mesh.primitive_ico_sphere_add(subdivisions=2, radius=radius)
-        sphere_template = bpy.context.active_object
-        sphere_template.name = "ParticleTemplate"
-        
-        # 创建点云对象（空网格）
-        bpy.ops.object.empty_add(type='PLAIN_AXES')
-        point_cloud = bpy.context.active_object
-        point_cloud.name = "PointCloud"
-        
-        # 删除空对象，创建新的网格对象
-        bpy.ops.object.delete()
-        bpy.ops.mesh.primitive_cube_add()
-        point_cloud = bpy.context.active_object
-        point_cloud.name = "PointCloud"
-        
-        # 清除默认立方体，创建点云网格
-        mesh = point_cloud.data
-        mesh.clear_geometry()
-        
-        # 添加顶点（点云位置）
-        mesh.vertices.add(num_points)
-        mesh.vertices.foreach_set("co", positions.flatten())
-        
-        # 更新网格
-        mesh.update()
-        
-        # 使用Geometry Nodes进行实例化
-        # 为点云对象添加Geometry Nodes修改器
-        if bpy.app.version >= (3, 0, 0):  # Blender 3.0+ 支持Geometry Nodes
-            # 创建Geometry Nodes修改器
-            mod = point_cloud.modifiers.new(name="PointCloudInstances", type='NODES')
-            
-            # 创建节点组
-            node_group = bpy.data.node_groups.new(name="PointCloudInstances", type='GeometryNodeTree')
-            mod.node_group = node_group
-            
-            # 添加输入输出节点
-            input_node = node_group.nodes.new('NodeGroupInput')
-            output_node = node_group.nodes.new('NodeGroupOutput')
-            
-            # 添加实例化节点
-            instance_node = node_group.nodes.new('GeometryNodeInstanceOnPoints')
-            
-            # 添加球体节点
-            sphere_node = node_group.nodes.new('GeometryNodeMeshIcoSphere')
-            sphere_node.inputs['Radius'].default_value = radius
-            sphere_node.inputs['Subdivisions'].default_value = 2
-            
-            # 连接节点
-            node_group.links.new(input_node.outputs['Geometry'], instance_node.inputs['Points'])
-            node_group.links.new(sphere_node.outputs['Mesh'], instance_node.inputs['Instance'])
-            node_group.links.new(instance_node.outputs['Instances'], output_node.inputs['Geometry'])
-        else:
-            # Blender 2.93及以下版本：使用粒子系统
-            # 删除当前对象，改用粒子系统方法
-            bpy.ops.object.delete()
-            self._create_point_cloud_with_particles(positions, colors, radius)
-            return
-        
-        # 创建材质并应用颜色
-        self._apply_colors_to_mesh(point_cloud, colors, num_points)
-        
-        # 隐藏模板球体
-        sphere_template.hide_viewport = True
-        sphere_template.hide_render = True
-    
-    def _create_point_cloud_with_particles(self, positions, colors, radius):
-        """
-        使用粒子系统创建点云（Blender 2.93及以下版本的备选方法）
-        """
-        # 创建基础球体
-        bpy.ops.mesh.primitive_ico_sphere_add(subdivisions=2, radius=radius)
-        sphere = bpy.context.active_object
-        sphere.name = "PointCloud"
-        
-        # 创建材质
-        mat = bpy.data.materials.new(name="PointCloudMaterial")
-        mat.use_nodes = True
-        bsdf = mat.node_tree.nodes.get("Principled BSDF")
-        
-        # 使用顶点颜色（如果支持）
-        # 这里简化处理：使用平均颜色
-        avg_color = np.mean(colors, axis=0)
-        if bsdf:
-            bsdf.inputs["Base Color"].default_value = (*avg_color, 1.0)
-        
-        sphere.data.materials.append(mat)
-        
-        # 使用数组修改器复制球体（性能较差，但兼容旧版本）
-        # 注意：对于大量点云，这种方法会很慢
-        print(f"Warning: Using fallback method for Blender < 3.0. Performance may be slow for large point clouds.")
-    
-    def _apply_colors_to_mesh(self, obj, colors, num_points):
-        """
-        为网格应用颜色（使用顶点颜色或材质）
-        
-        Args:
-            obj: Blender对象
-            colors: (N, 3) RGB颜色数组
-            num_points: 点的数量
-        """
-        # 创建材质
-        mat = bpy.data.materials.new(name="PointCloudMaterial")
-        mat.use_nodes = True
-        
-        # 获取或创建Principled BSDF节点
-        bsdf = mat.node_tree.nodes.get("Principled BSDF")
-        if bsdf is None:
-            bsdf = mat.node_tree.nodes.new("ShaderNodeBsdfPrincipled")
-        
-        # 尝试使用顶点颜色
-        # 为网格添加顶点颜色层
-        mesh = obj.data
-        if not mesh.vertex_colors:
-            color_layer = mesh.vertex_colors.new(name="Col")
-        else:
-            color_layer = mesh.vertex_colors[0]
-        
-        # 设置顶点颜色
-        for i, color in enumerate(colors):
-            if i < len(color_layer.data):
-                color_layer.data[i].color = (*color, 1.0)
-        
-        # 在材质中使用顶点颜色
-        vertex_color_node = mat.node_tree.nodes.new("ShaderNodeVertexColor")
-        vertex_color_node.layer_name = "Col"
-        mat.node_tree.links.new(vertex_color_node.outputs["Color"], bsdf.inputs["Base Color"])
-        
-        # 应用材质
-        if len(obj.data.materials) == 0:
-            obj.data.materials.append(mat)
-        else:
-            obj.data.materials[0] = mat
-    
-    def create_point_cloud_simple(self, positions, colors, radius):
-        """
-        简化方法：直接创建带颜色的点云网格（不使用Geometry Nodes）
-        对于大量点云，这种方法可能更稳定
-        
-        Args:
-            positions: (N, 3) 位置数组
-            colors: (N, 3) RGB颜色数组，范围[0, 1]
-            radius: 粒子半径
-        """
-        num_points = len(positions)
+        assert len(normals) == num_points, "Positions and normals must have the same length"
         
         # 创建网格对象
         mesh = bpy.data.meshes.new(name="PointCloud")
@@ -543,87 +430,125 @@ class BlenderNormalRenderer:
         mesh.vertices.add(num_points)
         mesh.vertices.foreach_set("co", positions.flatten())
         
-        # 添加顶点颜色
-        color_layer = mesh.vertex_colors.new(name="Col")
-        for i, color in enumerate(colors):
-            if i < len(color_layer.data):
-                color_layer.data[i].color = (*color, 1.0)
+        # 将每个粒子的normal转换为RGB颜色
+        # 确保每个粒子的颜色直接来自其对应的normal信息
+        colors = self.normal_to_rgb(normals)
         
-        # 更新网格
+        # 创建颜色属性（Geometry Nodes使用属性而不是顶点颜色）
+        # 属性名称"Col"将用于材质中的ShaderNodeAttribute节点
+        color_attr_name = "Col"
+        if color_attr_name in mesh.attributes:
+            mesh.attributes.remove(mesh.attributes[color_attr_name])
+        
+        color_attr = mesh.attributes.new(name=color_attr_name, type='FLOAT_COLOR', domain='POINT')
+        
+        # 为每个粒子设置颜色：使用foreach_set优化性能（10x-50x提升）
+        # 确保颜色值在[0, 1]范围内，并转换为RGBA格式
+        colors_clipped = np.clip(colors, 0.0, 1.0)
+        # 创建RGBA数组：将RGB转换为(R, G, B, A)格式，A固定为1.0
+        rgba_array = np.column_stack([colors_clipped, np.ones(num_points)]).astype(np.float32).flatten()
+        # 使用foreach_set一次性设置所有颜色（比for循环快10-50倍）
+        color_attr.data.foreach_set('color', rgba_array)
+        
         mesh.update()
         
         # 创建材质
         mat = bpy.data.materials.new(name="PointCloudMaterial")
         mat.use_nodes = True
-        
-        # 使用顶点颜色
-        vertex_color_node = mat.node_tree.nodes.new("ShaderNodeVertexColor")
-        vertex_color_node.layer_name = "Col"
-        
         bsdf = mat.node_tree.nodes.get("Principled BSDF")
+        if bsdf is None:
+            bsdf = mat.node_tree.nodes.new("ShaderNodeBsdfPrincipled")
+        
+        # 创建Attribute节点读取颜色属性
+        # 关键：由于使用了Realize Instances，实例已转换为真实几何体
+        # 因此需要明确设置为GEOMETRY模式，从几何体点域读取属性
+        try:
+            color_attr_node = mat.node_tree.nodes.new("ShaderNodeAttribute")
+            color_attr_node.attribute_name = "Col"
+            # 强制设置为 GEOMETRY，因为我们在节点里已经 Realize 了
+            if hasattr(color_attr_node, 'attribute_type'):
+                color_attr_node.attribute_type = 'GEOMETRY'
+            color_output = color_attr_node.outputs["Color"]
+            print(f'    Created Attribute node to read "Col" attribute (GEOMETRY mode)')
+        except Exception as e:
+            print(f'    Warning: Could not create Attribute node: {e}')
+            color_attr_node = mat.node_tree.nodes.new("ShaderNodeRGB")
+            color_attr_node.outputs[0].default_value = (1.0, 0.0, 0.0, 1.0)
+            color_output = color_attr_node.outputs["Color"]
+        
+        # 连接颜色到BSDF
+        if bsdf and "Base Color" in bsdf.inputs:
+            mat.node_tree.links.new(color_output, bsdf.inputs["Base Color"])
+        
+        # 设置自发光（适中的自发光强度）
         if bsdf:
-            mat.node_tree.links.new(vertex_color_node.outputs["Color"], bsdf.inputs["Base Color"])
-            # 设置材质为自发光（使点更明显）
-            bsdf.inputs["Emission Strength"].default_value = 0.5
-            bsdf.inputs["Emission Color"].default_value = (1.0, 1.0, 1.0, 1.0)
+            if "Emission Strength" in bsdf.inputs:
+                bsdf.inputs["Emission Strength"].default_value = 0.3  # 稍微降低自发光强度
+            if "Emission Color" in bsdf.inputs:
+                mat.node_tree.links.new(color_output, bsdf.inputs["Emission Color"])
+            elif "Emission" in bsdf.inputs:
+                mat.node_tree.links.new(color_output, bsdf.inputs["Emission"])
         
         obj.data.materials.append(mat)
         
-        # 使用Geometry Nodes将点转换为球体实例
-        # 这需要Blender 3.0+
+        # 创建Geometry Nodes修改器
+        # 关键：需要显式传递颜色属性到实例
         if bpy.app.version >= (3, 0, 0):
             try:
-                # 检查是否已有同名的节点组
-                if "PointInstances" in bpy.data.node_groups:
-                    node_group = bpy.data.node_groups["PointInstances"]
-                else:
-                    node_group = bpy.data.node_groups.new(name="PointInstances", type='GeometryNodeTree')
+                node_group_name = f"PointInstances_{id(obj)}"
+                node_group = bpy.data.node_groups.new(name=node_group_name, type='GeometryNodeTree')
+                node_group.inputs.new('NodeSocketGeometry', 'Geometry')
+                node_group.outputs.new('NodeSocketGeometry', 'Geometry')
                 
-                # 清空现有节点（如果存在）
-                node_group.nodes.clear()
-                
-                # 创建输入输出节点
                 input_node = node_group.nodes.new('NodeGroupInput')
                 output_node = node_group.nodes.new('NodeGroupOutput')
                 
-                # 添加输入插槽
-                if 'Geometry' not in [socket.name for socket in input_node.outputs]:
-                    input_node.outputs.new('NodeSocketGeometry', 'Geometry')
-                if 'Geometry' not in [socket.name for socket in output_node.inputs]:
-                    output_node.inputs.new('NodeSocketGeometry', 'Geometry')
-                
-                # 创建实例化节点
                 instance_node = node_group.nodes.new('GeometryNodeInstanceOnPoints')
                 sphere_node = node_group.nodes.new('GeometryNodeMeshIcoSphere')
                 
                 sphere_node.inputs['Radius'].default_value = radius
-                sphere_node.inputs['Subdivisions'].default_value = 2
+                sphere_node.inputs['Subdivisions'].default_value = 2  # 增加细分以提升球体圆滑度
                 
-                # 连接节点
+                # 连接：输入几何体 -> InstanceOnPoints
                 node_group.links.new(input_node.outputs['Geometry'], instance_node.inputs['Points'])
                 node_group.links.new(sphere_node.outputs['Mesh'], instance_node.inputs['Instance'])
-                node_group.links.new(instance_node.outputs['Instances'], output_node.inputs['Geometry'])
                 
-                # 添加修改器
+                # --- [简化流程开始] ---
+                
+                # 1. Realize Instances (实现实例)
+                # 这一步会自动把点上的 "Col" 属性传递给生成的球体顶点
+                realize_node = node_group.nodes.new('GeometryNodeRealizeInstances')
+                node_group.links.new(instance_node.outputs['Instances'], realize_node.inputs['Geometry'])
+                
+                # 2. Set Material (设置材质) - 这一步至关重要！
+                # Realize Instances 后材质经常丢失，必须在这里显式指定
+                set_mat_node = node_group.nodes.new('GeometryNodeSetMaterial')
+                set_mat_node.inputs['Material'].default_value = mat
+                node_group.links.new(realize_node.outputs['Geometry'], set_mat_node.inputs['Geometry'])
+                
+                # 3. Output (输出)
+                node_group.links.new(set_mat_node.outputs['Geometry'], output_node.inputs['Geometry'])
+                
+                # --- [简化流程结束] ---
+                
                 mod = obj.modifiers.new(name="PointInstances", type='NODES')
                 mod.node_group = node_group
-                
+                print(f'    Geometry Nodes modifier created (Simplified: Instance -> Realize -> SetMaterial)')
             except Exception as e:
                 print(f"Warning: Could not create Geometry Nodes modifier: {e}")
-                print("Falling back to simple point rendering (points may not be visible as spheres)")
                 import traceback
                 traceback.print_exc()
         
         return obj
     
-    def build_scene(self, positions, colors, radius, bbox_min=None, bbox_max=None, 
+    def build_scene(self, positions, normals, radius, bbox_min=None, bbox_max=None, 
                     center=None, bbox_size=None, add_environment=True):
         """
         构建Blender场景
         
         Args:
             positions: (N, 3) 位置数组
-            colors: (N, 3) RGB颜色数组
+            normals: (N, 3) 法向量数组（从PLY文件读取，将转换为RGB颜色）
             radius: 粒子半径
             bbox_min: 边界框最小值（可选）
             bbox_max: 边界框最大值（可选）
@@ -646,9 +571,9 @@ class BlenderNormalRenderer:
         # 设置相机
         self.setup_camera(center, bbox_size)
         
-        # 创建点云
+        # 创建点云（每个粒子的颜色将从其normal信息转换而来）
         print(f'    Creating point cloud with {len(positions):,} points...', end=' ', flush=True)
-        self.create_point_cloud_simple(positions, colors, radius)
+        self.create_point_cloud_simple(positions, normals, radius)
         print('Done')
         
         # 添加环境（地板和背景光源）
@@ -657,28 +582,37 @@ class BlenderNormalRenderer:
         
         return scene
     
-    def render(self, positions, normals, batch_indices=None, use_batch_rendering=False):
+    def render(self, positions, normals, batch_indices=None, use_batch_rendering=False,
+               single_batch_id=None, max_batches=None):
         """
         渲染点云
+        每个粒子的RGB颜色将从PLY文件中读取的normal信息转换而来
         
         Args:
             positions: (N, 3) 位置数组
-            normals: (N, 3) 法向量数组
-            batch_indices: (N,) 批次索引数组（可选，当前版本未使用）
-            use_batch_rendering: 是否使用分批渲染（当前版本未实现）
+            normals: (N, 3) 法向量数组（从PLY文件读取，将转换为RGB颜色）
+            batch_indices: (N,) 批次索引数组（可选）
+            use_batch_rendering: 是否使用分批渲染（基于batch_idx）
+            single_batch_id: 如果指定，只渲染这个batch ID（用于测试）
+            max_batches: 如果指定，最多渲染这么多batch（用于测试）
             
         Returns:
             image_path: 渲染图像的路径
         """
-        # 标准化点云
+        # 降采样点云（如果设置了max_points）
+        if self.max_points is not None and len(positions) > self.max_points:
+            print(f'  Downsampling from {len(positions):,} to {self.max_points:,} points...', end=' ', flush=True)
+            positions, normals = self.downsample_points(positions, normals, self.max_points)
+            print('Done')
+        
+        # 标准化点云位置
         print('  Standardizing point cloud...', end=' ', flush=True)
         positions_std, center, scale = self.standardize_point_cloud(positions)
         print('Done')
         
-        # 法向量到RGB映射
-        print('  Converting normals to RGB colors...', end=' ', flush=True)
-        colors = self.normal_to_rgb(normals)
-        print('Done')
+        # 注意：normals不需要标准化，因为它们只是方向信息
+        # 颜色转换将在create_point_cloud_simple中完成，确保每个粒子的颜色
+        # 直接来自其对应的normal信息
         
         # 计算粒子半径
         print('  Computing particle radius...', end=' ', flush=True)
@@ -688,9 +622,27 @@ class BlenderNormalRenderer:
             radius = self.particle_radius
         print(f'Done (radius={radius:.6f})')
         
-        # 构建场景
+        # 计算全局边界框（用于保持场景一致性）
+        bbox_min = np.min(positions_std, axis=0)
+        bbox_max = np.max(positions_std, axis=0)
+        bbox_center = (bbox_min + bbox_max) * 0.5
+        bbox_size = np.max(bbox_max - bbox_min)
+        
+        # 如果使用分批渲染且batch_indices可用
+        if use_batch_rendering and batch_indices is not None:
+            return self._render_batched_by_batch_idx(
+                positions_std, normals, radius, batch_indices,
+                bbox_min, bbox_max, bbox_center, bbox_size,
+                single_batch_id=single_batch_id,
+                max_batches=max_batches
+            )
+        
+        # 一次性渲染所有粒子
+        # normals将直接传递给build_scene，在create_point_cloud_simple中转换为颜色
         print('  Building Blender scene...', flush=True)
-        self.build_scene(positions_std, colors, radius, add_environment=True)
+        self.build_scene(positions_std, normals, radius, 
+                        bbox_min, bbox_max, bbox_center, bbox_size,
+                        add_environment=True)
         
         # 渲染场景
         print('  Rendering scene...', end=' ', flush=True)
@@ -713,15 +665,101 @@ class BlenderNormalRenderer:
         
         return output_file_path
     
-    def process(self):
+    def _render_batched_by_batch_idx(self, positions, normals, radius, batch_indices,
+                                     bbox_min, bbox_max, center, bbox_size,
+                                     single_batch_id=None, max_batches=None):
+        """
+        按batch_idx收集粒子并一次性渲染
+        每个粒子的RGB颜色将从其对应的normal信息转换而来
+        
+        Args:
+            positions: (N, 3) 标准化后的位置数组
+            normals: (N, 3) 法向量数组（从PLY文件读取，将转换为RGB颜色）
+            radius: 粒子半径
+            batch_indices: (N,) 批次索引数组
+            bbox_min: 全局边界框最小值
+            bbox_max: 全局边界框最大值
+            center: 全局中心点
+            bbox_size: 全局边界框大小
+            single_batch_id: 如果指定，只渲染这个batch ID（用于测试）
+            max_batches: 如果指定，最多渲染这么多batch（用于测试）
+            
+        Returns:
+            image_path: 渲染图像的路径
+        """
+        # 获取唯一的批次ID并排序
+        unique_batches = np.unique(batch_indices)
+        unique_batches = np.sort(unique_batches)
+        total_batches = len(unique_batches)
+        
+        # 确定要渲染的batch列表
+        if single_batch_id is not None:
+            if single_batch_id not in unique_batches:
+                raise ValueError(f'Batch ID {single_batch_id} not found. Available batch IDs: {unique_batches[0]} to {unique_batches[-1]}')
+            selected_batches = [single_batch_id]
+            num_batches = 1
+            print(f'  Collecting particles from batch {single_batch_id}...')
+        elif max_batches is not None:
+            # 限制渲染的batch数量
+            selected_batches = unique_batches[:max_batches]
+            num_batches = len(selected_batches)
+            print(f'  Collecting particles from {num_batches} batches (out of {total_batches} total)...')
+        else:
+            selected_batches = unique_batches
+            num_batches = total_batches
+            print(f'  Collecting particles from all {num_batches} batches...')
+        
+        # 收集所有指定batch的粒子（保持positions和normals的对应关系）
+        batch_mask = np.isin(batch_indices, selected_batches)
+        selected_positions = positions[batch_mask]
+        selected_normals = normals[batch_mask]  # 保持与positions的对应关系
+        num_particles = len(selected_positions)
+        
+        print(f'  Total particles to render: {num_particles:,}')
+        
+        # 一次性构建场景并渲染
+        # normals将直接传递给build_scene，在create_point_cloud_simple中转换为颜色
+        print('  Building Blender scene...', flush=True)
+        self.build_scene(selected_positions, selected_normals, radius,
+                        bbox_min, bbox_max, center, bbox_size,
+                        add_environment=True)
+        
+        # 渲染场景
+        print('  Rendering scene...', end=' ', flush=True)
+        
+        # 设置输出路径
+        if self.output_folder:
+            os.makedirs(self.output_folder, exist_ok=True)
+            output_file_path = os.path.join(self.output_folder, self.filename)
+        else:
+            output_file_path = os.path.join(self.folder, self.filename)
+        
+        # 设置渲染输出路径
+        scene = bpy.context.scene
+        scene.render.filepath = output_file_path
+        
+        # 执行渲染
+        bpy.ops.render.render(write_still=True)
+        
+        print(f'Done -> {os.path.basename(output_file_path)}.png')
+        
+        return output_file_path
+    
+    def process(self, use_batch_rendering=False, single_batch_id=None, max_batches=None):
         """
         处理单帧点云
+        
+        Args:
+            use_batch_rendering: 是否使用基于batch_idx的分批渲染
+            single_batch_id: 如果指定，只渲染这个batch ID（用于测试）
+            max_batches: 如果指定，最多渲染这么多batch（用于测试）
         """
         # 加载点云
         positions, normals, batch_indices = self.load_point_cloud()
         
         # 渲染
-        image_path = self.render(positions, normals, batch_indices)
+        image_path = self.render(positions, normals, batch_indices, 
+                                use_batch_rendering, single_batch_id, max_batches)
         
         return image_path
 
@@ -735,7 +773,11 @@ def batch_render(input_folder='trajectory_ply',
                  image_height=1080,
                  samples=64,
                  engine='cycles',
-                 blender_path=None):
+                 blender_path=None,
+                 use_batch_rendering=False,
+                 single_batch_id=None,
+                 max_batches=None,
+                 max_points=None):
     """
     批量渲染PLY文件（需要在Blender环境中运行）
     
@@ -750,6 +792,9 @@ def batch_render(input_folder='trajectory_ply',
         samples: 采样数（Cycles渲染引擎）
         engine: 渲染引擎 ('cycles' 或 'eevee')
         blender_path: Blender可执行文件路径（如果通过命令行调用）
+        use_batch_rendering: 是否使用基于batch_idx的分批渲染
+        single_batch_id: 如果指定，只渲染这个batch ID（用于测试，需要use_batch_rendering=True）
+        max_batches: 如果指定，最多渲染这么多batch（用于测试，需要use_batch_rendering=True）
     """
     import glob
     
@@ -793,6 +838,13 @@ def batch_render(input_folder='trajectory_ply',
     print(f'Image size: {image_width}x{image_height}')
     print(f'Samples per pixel: {samples}')
     print(f'Render engine: {engine}')
+    if use_batch_rendering:
+        if single_batch_id is not None:
+            print(f'Batch rendering: Single batch ID {single_batch_id}')
+        elif max_batches is not None:
+            print(f'Batch rendering: Max {max_batches} batches')
+        else:
+            print('Batch rendering: All batches')
     print('=' * 60)
     
     os.makedirs(output_folder, exist_ok=True)
@@ -814,7 +866,8 @@ def batch_render(input_folder='trajectory_ply',
                 image_width=image_width,
                 image_height=image_height,
                 samples=samples,
-                engine=engine
+                engine=engine,
+                max_points=max_points
             )
             
             # 加载点云
@@ -823,7 +876,8 @@ def batch_render(input_folder='trajectory_ply',
             print(f'Done ({len(positions):,} points)')
             
             # 处理和渲染
-            image_path = renderer.render(positions, normals, batch_indices)
+            image_path = renderer.render(positions, normals, batch_indices, 
+                                        use_batch_rendering, single_batch_id, max_batches)
             
             # 清理场景（为下一个文件准备）
             bpy.ops.object.select_all(action='SELECT')
@@ -877,7 +931,28 @@ if __name__ == '__main__':
     parser.add_argument('--engine', type=str, default='cycles',
                         choices=['cycles', 'eevee'],
                         help='Render engine: cycles or eevee (default: cycles)')
+    parser.add_argument('--use-batch-rendering', action='store_true',
+                        help='Use batch_idx-based batch rendering (256 batches, 2048 particles each)')
+    parser.add_argument('--single-batch', type=int, default=None,
+                        help='Render only a single batch ID (0-255) for testing (requires --use-batch-rendering)')
+    parser.add_argument('--max-batches', type=int, default=None,
+                        help='Maximum number of batches to render (requires --use-batch-rendering)')
+    parser.add_argument('--max-points', type=int, default=None,
+                        help='Maximum number of points to render (LOD downsampling, None=no limit)')
     args = parser.parse_args()
+    
+    # 验证参数
+    if args.single_batch is not None and not args.use_batch_rendering:
+        print('Warning: --single-batch requires --use-batch-rendering. Ignoring --single-batch.')
+        args.single_batch = None
+    
+    if args.max_batches is not None and not args.use_batch_rendering:
+        print('Warning: --max-batches requires --use-batch-rendering. Ignoring --max-batches.')
+        args.max_batches = None
+    
+    if args.single_batch is not None and args.max_batches is not None:
+        print('Warning: --single-batch and --max-batches cannot be used together. Using --single-batch.')
+        args.max_batches = None
     
     batch_render(
         input_folder=args.input,
@@ -888,6 +963,10 @@ if __name__ == '__main__':
         image_width=args.width,
         image_height=args.height,
         samples=args.samples,
-        engine=args.engine
+        engine=args.engine,
+        use_batch_rendering=args.use_batch_rendering,
+        single_batch_id=args.single_batch,
+        max_batches=args.max_batches,
+        max_points=args.max_points
     )
 
