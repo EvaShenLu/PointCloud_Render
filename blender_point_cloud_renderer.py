@@ -12,16 +12,17 @@ except ImportError:
     print("Warning: bpy not available. This script must be run within Blender or via 'blender --python' command.")
 
 
-class BlenderNormalRenderer:
+class BlenderPointCloudRenderer:
     """
     使用Blender Python API的点云渲染器
-    将法向量映射为RGB颜色，使用Blender的高效实例化功能渲染
+    纯点云渲染，所有粒子使用相同颜色，使用Blender的高效实例化功能渲染
     """
     
     def __init__(self, file_path, output_folder=None, 
                  particle_radius=None, 
                  image_width=1920, image_height=1080,
-                 samples=64, engine='cycles', max_points=None):
+                 samples=64, engine='cycles', max_points=None,
+                 particle_color=(1.0, 1.0, 1.0)):
         """
         初始化渲染器
         
@@ -34,6 +35,7 @@ class BlenderNormalRenderer:
             samples: 采样数（Cycles渲染引擎）
             engine: 渲染引擎 ('cycles' 或 'eevee')
             max_points: 最大点数（None表示不限制，用于LOD降采样）
+            particle_color: 粒子颜色 (R, G, B)，范围[0, 1]，默认白色
         """
         if not BPY_AVAILABLE:
             raise RuntimeError("bpy is not available. Please run this script within Blender or via 'blender --python' command.")
@@ -49,6 +51,7 @@ class BlenderNormalRenderer:
         self.samples = samples
         self.engine = engine.lower()
         self.max_points = max_points  # LOD降采样目标点数
+        self.particle_color = particle_color  # 粒子颜色
         
         if self.engine not in ['cycles', 'eevee']:
             raise ValueError(f"Unsupported engine: {engine}. Must be 'cycles' or 'eevee'")
@@ -97,7 +100,7 @@ class BlenderNormalRenderer:
             
         Returns:
             positions: (N, 3) 位置数组
-            normals: (N, 3) 法向量数组
+            normals: (N, 3) 法向量数组（虽然不使用，但保持接口一致）
             batch_indices: (N,) 批次索引数组或None
         """
         dtype = np.dtype([
@@ -125,6 +128,7 @@ class BlenderNormalRenderer:
     def load_point_cloud(self):
         """
         加载PLY文件，返回位置、法向量和批次索引
+        （法向量虽然不使用，但保持接口一致）
         """
         file_extension = os.path.splitext(self.file_path)[1]
         
@@ -139,32 +143,13 @@ class BlenderNormalRenderer:
             raise ValueError(f'Unsupported file format: {file_extension}')
     
     @staticmethod
-    def normal_to_rgb(normals):
-        """
-        将法向量映射到RGB颜色
-        
-        Args:
-            normals: (N, 3) 法向量数组
-            
-        Returns:
-            rgb: (N, 3) RGB颜色数组，范围[0, 1]
-        """
-        # 归一化法向量
-        norms = np.sqrt(np.sum(normals ** 2, axis=1, keepdims=True))
-        normalized = normals / (norms + 1e-8)
-        
-        # 映射到[0, 1]范围
-        rgb = (normalized + 1.0) * 0.5
-        return np.clip(rgb, 0.0, 1.0)
-    
-    @staticmethod
     def downsample_points(positions, normals, target_points=50000):
         """
         降采样点云以提升渲染性能（LOD）
         
         Args:
             positions: (N, 3) 位置数组
-            normals: (N, 3) 法向量数组
+            normals: (N, 3) 法向量数组（虽然不使用，但保持接口一致）
             target_points: 目标点数
             
         Returns:
@@ -431,16 +416,15 @@ class BlenderNormalRenderer:
     
     def create_point_cloud_simple(self, positions, normals, radius):
         """
-        创建带颜色的点云网格，使用Geometry Nodes实例化
-        每个粒子的RGB颜色直接从PLY文件中读取的normal信息转换而来
+        创建纯点云网格，使用Geometry Nodes实例化
+        所有粒子使用相同的颜色
         
         Args:
             positions: (N, 3) 位置数组
-            normals: (N, 3) 法向量数组（从PLY文件读取）
+            normals: (N, 3) 法向量数组（不使用，但保持接口一致）
             radius: 粒子半径
         """
         num_points = len(positions)
-        assert len(normals) == num_points, "Positions and normals must have the same length"
         
         # 创建网格对象
         mesh = bpy.data.meshes.new(name="PointCloud")
@@ -451,69 +435,31 @@ class BlenderNormalRenderer:
         mesh.vertices.add(num_points)
         mesh.vertices.foreach_set("co", positions.flatten())
         
-        # 将每个粒子的normal转换为RGB颜色
-        # 确保每个粒子的颜色直接来自其对应的normal信息
-        colors = self.normal_to_rgb(normals)
-        
-        # 创建颜色属性（Geometry Nodes使用属性而不是顶点颜色）
-        # 属性名称"Col"将用于材质中的ShaderNodeAttribute节点
-        color_attr_name = "Col"
-        if color_attr_name in mesh.attributes:
-            mesh.attributes.remove(mesh.attributes[color_attr_name])
-        
-        color_attr = mesh.attributes.new(name=color_attr_name, type='FLOAT_COLOR', domain='POINT')
-        
-        # 为每个粒子设置颜色：使用foreach_set优化性能（10x-50x提升）
-        # 确保颜色值在[0, 1]范围内，并转换为RGBA格式
-        colors_clipped = np.clip(colors, 0.0, 1.0)
-        # 创建RGBA数组：将RGB转换为(R, G, B, A)格式，A固定为1.0
-        rgba_array = np.column_stack([colors_clipped, np.ones(num_points)]).astype(np.float32).flatten()
-        # 使用foreach_set一次性设置所有颜色（比for循环快10-50倍）
-        color_attr.data.foreach_set('color', rgba_array)
-        
         mesh.update()
         
-        # 创建材质
+        # 创建材质（使用单一颜色）
         mat = bpy.data.materials.new(name="PointCloudMaterial")
         mat.use_nodes = True
         bsdf = mat.node_tree.nodes.get("Principled BSDF")
         if bsdf is None:
             bsdf = mat.node_tree.nodes.new("ShaderNodeBsdfPrincipled")
         
-        # 创建Attribute节点读取颜色属性
-        # 关键：由于使用了Realize Instances，实例已转换为真实几何体
-        # 因此需要明确设置为GEOMETRY模式，从几何体点域读取属性
-        try:
-            color_attr_node = mat.node_tree.nodes.new("ShaderNodeAttribute")
-            color_attr_node.attribute_name = "Col"
-            # 强制设置为 GEOMETRY，因为我们在节点里已经 Realize 了
-            if hasattr(color_attr_node, 'attribute_type'):
-                color_attr_node.attribute_type = 'GEOMETRY'
-            color_output = color_attr_node.outputs["Color"]
-            print(f'    Created Attribute node to read "Col" attribute (GEOMETRY mode)')
-        except Exception as e:
-            print(f'    Warning: Could not create Attribute node: {e}')
-            color_attr_node = mat.node_tree.nodes.new("ShaderNodeRGB")
-            color_attr_node.outputs[0].default_value = (1.0, 0.0, 0.0, 1.0)
-            color_output = color_attr_node.outputs["Color"]
-        
-        # 连接颜色到BSDF
+        # 设置基础颜色为单一颜色
         if bsdf and "Base Color" in bsdf.inputs:
-            mat.node_tree.links.new(color_output, bsdf.inputs["Base Color"])
+            bsdf.inputs["Base Color"].default_value = (*self.particle_color, 1.0)
         
         # 设置自发光（适中的自发光强度）
         if bsdf:
             if "Emission Strength" in bsdf.inputs:
-                bsdf.inputs["Emission Strength"].default_value = 0.3  # 稍微降低自发光强度
+                bsdf.inputs["Emission Strength"].default_value = 0.3
             if "Emission Color" in bsdf.inputs:
-                mat.node_tree.links.new(color_output, bsdf.inputs["Emission Color"])
+                bsdf.inputs["Emission Color"].default_value = (*self.particle_color, 1.0)
             elif "Emission" in bsdf.inputs:
-                mat.node_tree.links.new(color_output, bsdf.inputs["Emission"])
+                bsdf.inputs["Emission"].default_value = (*self.particle_color, 1.0)
         
         obj.data.materials.append(mat)
         
         # 创建Geometry Nodes修改器
-        # 关键：需要显式传递颜色属性到实例
         if bpy.app.version >= (3, 0, 0):
             try:
                 node_group_name = f"PointInstances_{id(obj)}"
@@ -537,7 +483,6 @@ class BlenderNormalRenderer:
                 # --- [简化流程开始] ---
                 
                 # 1. Realize Instances (实现实例)
-                # 这一步会自动把点上的 "Col" 属性传递给生成的球体顶点
                 realize_node = node_group.nodes.new('GeometryNodeRealizeInstances')
                 node_group.links.new(instance_node.outputs['Instances'], realize_node.inputs['Geometry'])
                 
@@ -569,7 +514,7 @@ class BlenderNormalRenderer:
         
         Args:
             positions: (N, 3) 位置数组
-            normals: (N, 3) 法向量数组（从PLY文件读取，将转换为RGB颜色）
+            normals: (N, 3) 法向量数组（不使用，但保持接口一致）
             radius: 粒子半径
             bbox_min: 边界框最小值（可选）
             bbox_max: 边界框最大值（可选）
@@ -592,7 +537,7 @@ class BlenderNormalRenderer:
         # 设置相机
         self.setup_camera(center, bbox_size)
         
-        # 创建点云（每个粒子的颜色将从其normal信息转换而来）
+        # 创建点云（所有粒子使用相同颜色）
         print(f'    Creating point cloud with {len(positions):,} points...', end=' ', flush=True)
         self.create_point_cloud_simple(positions, normals, radius)
         print('Done')
@@ -607,11 +552,11 @@ class BlenderNormalRenderer:
                single_batch_id=None, max_batches=None):
         """
         渲染点云
-        每个粒子的RGB颜色将从PLY文件中读取的normal信息转换而来
+        所有粒子使用相同的颜色
         
         Args:
             positions: (N, 3) 位置数组
-            normals: (N, 3) 法向量数组（从PLY文件读取，将转换为RGB颜色）
+            normals: (N, 3) 法向量数组（不使用，但保持接口一致）
             batch_indices: (N,) 批次索引数组（可选）
             use_batch_rendering: 是否使用分批渲染（基于batch_idx）
             single_batch_id: 如果指定，只渲染这个batch ID（用于测试）
@@ -630,10 +575,6 @@ class BlenderNormalRenderer:
         print('  Standardizing point cloud...', end=' ', flush=True)
         positions_std, center, scale = self.standardize_point_cloud(positions)
         print('Done')
-        
-        # 注意：normals不需要标准化，因为它们只是方向信息
-        # 颜色转换将在create_point_cloud_simple中完成，确保每个粒子的颜色
-        # 直接来自其对应的normal信息
         
         # 计算粒子半径
         print('  Computing particle radius...', end=' ', flush=True)
@@ -659,7 +600,6 @@ class BlenderNormalRenderer:
             )
         
         # 一次性渲染所有粒子
-        # normals将直接传递给build_scene，在create_point_cloud_simple中转换为颜色
         print('  Building Blender scene...', flush=True)
         self.build_scene(positions_std, normals, radius, 
                         bbox_min, bbox_max, bbox_center, bbox_size,
@@ -691,11 +631,11 @@ class BlenderNormalRenderer:
                                      single_batch_id=None, max_batches=None):
         """
         按batch_idx收集粒子并一次性渲染
-        每个粒子的RGB颜色将从其对应的normal信息转换而来
+        所有粒子使用相同的颜色
         
         Args:
             positions: (N, 3) 标准化后的位置数组
-            normals: (N, 3) 法向量数组（从PLY文件读取，将转换为RGB颜色）
+            normals: (N, 3) 法向量数组（不使用，但保持接口一致）
             radius: 粒子半径
             batch_indices: (N,) 批次索引数组
             bbox_min: 全局边界框最小值
@@ -730,16 +670,15 @@ class BlenderNormalRenderer:
             num_batches = total_batches
             print(f'  Collecting particles from all {num_batches} batches...')
         
-        # 收集所有指定batch的粒子（保持positions和normals的对应关系）
+        # 收集所有指定batch的粒子
         batch_mask = np.isin(batch_indices, selected_batches)
         selected_positions = positions[batch_mask]
-        selected_normals = normals[batch_mask]  # 保持与positions的对应关系
+        selected_normals = normals[batch_mask]  # 保持与positions的对应关系（虽然不使用）
         num_particles = len(selected_positions)
         
         print(f'  Total particles to render: {num_particles:,}')
         
         # 一次性构建场景并渲染
-        # normals将直接传递给build_scene，在create_point_cloud_simple中转换为颜色
         print('  Building Blender scene...', flush=True)
         self.build_scene(selected_positions, selected_normals, radius,
                         bbox_min, bbox_max, center, bbox_size,
@@ -798,7 +737,8 @@ def batch_render(input_folder='trajectory_ply',
                  use_batch_rendering=False,
                  single_batch_id=None,
                  max_batches=None,
-                 max_points=None):
+                 max_points=None,
+                 particle_color=(1.0, 1.0, 1.0)):
     """
     批量渲染PLY文件（需要在Blender环境中运行）
     
@@ -816,6 +756,8 @@ def batch_render(input_folder='trajectory_ply',
         use_batch_rendering: 是否使用基于batch_idx的分批渲染
         single_batch_id: 如果指定，只渲染这个batch ID（用于测试，需要use_batch_rendering=True）
         max_batches: 如果指定，最多渲染这么多batch（用于测试，需要use_batch_rendering=True）
+        max_points: 最大点数（LOD降采样）
+        particle_color: 粒子颜色 (R, G, B)，范围[0, 1]，默认白色
     """
     import glob
     
@@ -859,6 +801,7 @@ def batch_render(input_folder='trajectory_ply',
     print(f'Image size: {image_width}x{image_height}')
     print(f'Samples per pixel: {samples}')
     print(f'Render engine: {engine}')
+    print(f'Particle color: RGB{particle_color}')
     if use_batch_rendering:
         if single_batch_id is not None:
             print(f'Batch rendering: Single batch ID {single_batch_id}')
@@ -881,14 +824,15 @@ def batch_render(input_folder='trajectory_ply',
         print('-' * 60)
         
         try:
-            renderer = BlenderNormalRenderer(
+            renderer = BlenderPointCloudRenderer(
                 ply_file,
                 output_folder=output_folder,
                 image_width=image_width,
                 image_height=image_height,
                 samples=samples,
                 engine=engine,
-                max_points=max_points
+                max_points=max_points,
+                particle_color=particle_color
             )
             
             # 加载点云
@@ -932,7 +876,7 @@ def batch_render(input_folder='trajectory_ply',
 if __name__ == '__main__':
     import argparse
     
-    parser = argparse.ArgumentParser(description='Render point clouds with normal-based coloring using Blender')
+    parser = argparse.ArgumentParser(description='Render point clouds with uniform coloring using Blender')
     parser.add_argument('--input', type=str, default='trajectory_ply',
                         help='Input folder containing PLY files')
     parser.add_argument('--output', type=str, default='render_output',
@@ -960,6 +904,9 @@ if __name__ == '__main__':
                         help='Maximum number of batches to render (requires --use-batch-rendering)')
     parser.add_argument('--max-points', type=int, default=None,
                         help='Maximum number of points to render (LOD downsampling, None=no limit)')
+    parser.add_argument('--color', type=float, nargs=3, default=[1.0, 1.0, 1.0],
+                        metavar=('R', 'G', 'B'),
+                        help='Particle color RGB values (0.0-1.0, default: 1.0 1.0 1.0 for white)')
     args = parser.parse_args()
     
     # 验证参数
@@ -975,6 +922,11 @@ if __name__ == '__main__':
         print('Warning: --single-batch and --max-batches cannot be used together. Using --single-batch.')
         args.max_batches = None
     
+    # 验证颜色值范围
+    particle_color = tuple(np.clip(args.color, 0.0, 1.0))
+    if particle_color != tuple(args.color):
+        print(f'Warning: Color values clipped to [0.0, 1.0]: {particle_color}')
+    
     batch_render(
         input_folder=args.input,
         output_folder=args.output,
@@ -988,6 +940,7 @@ if __name__ == '__main__':
         use_batch_rendering=args.use_batch_rendering,
         single_batch_id=args.single_batch,
         max_batches=args.max_batches,
-        max_points=args.max_points
+        max_points=args.max_points,
+        particle_color=particle_color
     )
 
