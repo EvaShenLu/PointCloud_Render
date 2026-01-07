@@ -320,7 +320,7 @@ class BlenderNormalRenderer:
         # 设置输出格式
         scene.render.image_settings.file_format = 'PNG'
         scene.render.image_settings.color_mode = 'RGB'
-        scene.render.image_settings.color_depth = '16'
+        scene.render.image_settings.color_depth = '8'
         
         # 禁用不必要的功能以提升性能
         scene.render.use_motion_blur = False  # 关闭运动模糊

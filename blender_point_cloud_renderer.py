@@ -21,7 +21,7 @@ class BlenderPointCloudRenderer:
     def __init__(self, file_path, output_folder=None, 
                  particle_radius=None, 
                  image_width=1920, image_height=1080,
-                 samples=64, engine='cycles', max_points=None,
+                 samples=64, max_points=None,
                  particle_color=(0.3, 0.3, 0.3)):
         """
         初始化渲染器
@@ -33,7 +33,6 @@ class BlenderPointCloudRenderer:
             image_width: 图像宽度
             image_height: 图像高度
             samples: 采样数（Cycles渲染引擎）
-            engine: 渲染引擎 ('cycles' 或 'eevee')
             max_points: 最大点数（None表示不限制，用于LOD降采样）
             particle_color: 粒子颜色 (R, G, B)，范围[0, 1]，默认灰色(0.3, 0.3, 0.3)
         """
@@ -49,12 +48,8 @@ class BlenderPointCloudRenderer:
         self.image_width = image_width
         self.image_height = image_height
         self.samples = samples
-        self.engine = engine.lower()
         self.max_points = max_points  # LOD降采样目标点数
         self.particle_color = particle_color  # 粒子颜色
-        
-        if self.engine not in ['cycles', 'eevee']:
-            raise ValueError(f"Unsupported engine: {engine}. Must be 'cycles' or 'eevee'")
     
     @staticmethod
     def _read_ply_header_fast(file_path):
@@ -181,8 +176,8 @@ class BlenderPointCloudRenderer:
         bbox_size = np.max(bbox_max - bbox_min)
         num_points = len(positions)
         
-        radius = bbox_size / (num_points ** 0.33) * 0.20  # 进一步增加系数以放大粒子
-        radius = max(0.005, min(radius, 0.025))  # 进一步增加最小和最大半径限制
+        radius = bbox_size / (num_points ** 0.33) * 0.30  # 增加系数以放大粒子
+        radius = max(0.005, min(radius, 0.035))  # 增加最小和最大半径限制
         
         return radius
     
@@ -219,131 +214,116 @@ class BlenderPointCloudRenderer:
         bpy.ops.object.select_all(action='SELECT')
         bpy.ops.object.delete(use_global=False)
         
-        # 设置渲染引擎
+        # 设置渲染引擎为Cycles
         scene = bpy.context.scene
-        scene.render.engine = self.engine.upper()
+        scene.render.engine = 'CYCLES'
         
-        # 调整曝光以提升整体亮度（Cycles和Eevee都支持）
+        # 调整曝光以提升整体亮度
         if hasattr(scene.view_settings, 'exposure'):
-            scene.view_settings.exposure = 0.5  # 增加曝光值
+            scene.view_settings.exposure = 0.5
         if hasattr(scene.view_settings, 'gamma'):
-            scene.view_settings.gamma = 1.2  # 稍微提升gamma
+            scene.view_settings.gamma = 1.2
         
         # 设置渲染分辨率
         scene.render.resolution_x = self.image_width
         scene.render.resolution_y = self.image_height
         scene.render.resolution_percentage = 100
         
-        # 设置渲染采样数（仅Cycles）
-        if self.engine == 'cycles':
-            # 使用传入的采样数，但设置合理的最小值
-            scene.cycles.samples = max(self.samples, 32)  # 降低最小采样数以提升速度
-            
-            # 使用自适应采样（平衡质量和速度）
-            scene.cycles.use_adaptive_sampling = True
-            scene.cycles.adaptive_threshold = 0.05  # 提高阈值以加快渲染
-            
-            # 启用降噪以减少噪点（允许较低采样数）
-            scene.cycles.use_denoising = True
-            # 使用OpenImageDenoise（如果可用）
-            if hasattr(scene.cycles, 'denoiser'):
-                scene.cycles.denoiser = 'OPENIMAGEDENOISE'
-            
-            # 简化光线追踪：对于点云，光线弹射1次足够
-            scene.cycles.max_bounces = 1
-            scene.cycles.diffuse_bounces = 0
-            scene.cycles.glossy_bounces = 0
-            scene.cycles.transparent_max_bounces = 1
-            scene.cycles.transmission_bounces = 0
-            
-            # 关闭Caustics（焦散）- 点云不需要，可以提升性能
-            scene.cycles.caustics_reflective = False
-            scene.cycles.caustics_refractive = False
-            
-            # 启用快速GI近似
-            scene.cycles.use_fast_gi = True
-            scene.cycles.fast_gi_method = 'REPLACE'
-            
-            # 使用Persistent Data（如果显存足够，保持静态BVH数据）
-            scene.cycles.use_persistent_data = True
-            
-            # 优化tile大小（GPU建议256，CPU建议512）
-            # 根据设备类型自动调整（在GPU设置之后进行）
-            # 注意：tile_size会在GPU设置后根据实际设备类型调整
-            
-            # 简化视口预览
-            scene.cycles.preview_samples = 16
-            
-            # 优化采样模式（使用更快的采样器）
-            if hasattr(scene.cycles, 'sampling_pattern'):
-                try:
-                    # 尝试使用TABULATED_SOBOL（通常更快）
-                    scene.cycles.sampling_pattern = 'TABULATED_SOBOL'
-                except (ValueError, TypeError):
-                    # 如果不可用，使用默认值
-                    pass
-            
-            # 使用GPU加速（如果可用）
+        # 设置Cycles渲染参数
+        # 使用传入的采样数，但设置合理的最小值
+        scene.cycles.samples = max(self.samples, 32)
+        
+        # 使用自适应采样（平衡质量和速度）
+        scene.cycles.use_adaptive_sampling = True
+        scene.cycles.adaptive_threshold = 0.05
+        
+        # 启用降噪以减少噪点（允许较低采样数）
+        scene.cycles.use_denoising = True
+        # 使用OpenImageDenoise（如果可用）
+        if hasattr(scene.cycles, 'denoiser'):
+            scene.cycles.denoiser = 'OPENIMAGEDENOISE'
+        
+        # 简化光线追踪：对于点云，光线弹射1次足够
+        scene.cycles.max_bounces = 1
+        scene.cycles.diffuse_bounces = 0
+        scene.cycles.glossy_bounces = 0
+        scene.cycles.transparent_max_bounces = 1
+        scene.cycles.transmission_bounces = 0
+        
+        # 关闭Caustics（焦散）- 点云不需要，可以提升性能
+        scene.cycles.caustics_reflective = False
+        scene.cycles.caustics_refractive = False
+        
+        # 启用快速GI近似
+        scene.cycles.use_fast_gi = True
+        scene.cycles.fast_gi_method = 'REPLACE'
+        
+        # 使用Persistent Data（如果显存足够，保持静态BVH数据）
+        scene.cycles.use_persistent_data = True
+        
+        # 简化视口预览
+        scene.cycles.preview_samples = 16
+        
+        # 优化采样模式（使用更快的采样器）
+        if hasattr(scene.cycles, 'sampling_pattern'):
             try:
-                prefs = bpy.context.preferences
-                cycles_prefs = prefs.addons['cycles'].preferences
-                
-                # 尝试获取设备列表
-                devices = cycles_prefs.get_devices()
-                
-                # 检查devices是否为None或空
-                if devices is None:
-                    # 如果get_devices()返回None，尝试直接设置GPU设备类型
-                    # 在某些Blender版本中，可以直接设置device类型
-                    try:
-                        scene.cycles.device = 'GPU'
-                        scene.cycles.tile_size = 256
-                        print('    Using GPU (device type set to GPU)')
-                    except:
-                        scene.cycles.device = 'CPU'
-                        scene.cycles.tile_size = 512
-                        print('    Using CPU (could not set GPU device type)')
-                else:
-                    # 查找可用的GPU设备并启用
-                    gpu_devices = []
-                    for device in devices:
-                        if device and device.type in ('CUDA', 'OPENCL', 'OPTIX', 'HIP', 'METAL', 'ONEAPI'):
-                            if not device.use:
-                                device.use = True  # 启用GPU设备
-                            gpu_devices.append(device)
-                    
-                    has_gpu = len(gpu_devices) > 0
-                    
-                    if has_gpu:
-                        scene.cycles.device = 'GPU'
-                        scene.cycles.tile_size = 256  # GPU优化tile大小
-                        device_names = [f"{d.name} ({d.type})" for d in gpu_devices if d.use]
-                        print(f'    Using GPU: {", ".join(device_names)}')
-                    else:
-                        # 即使没有找到设备，也尝试设置GPU（可能设备列表为空但GPU可用）
-                        try:
-                            scene.cycles.device = 'GPU'
-                            scene.cycles.tile_size = 256
-                            print('    Using GPU (device list empty, but GPU mode enabled)')
-                        except:
-                            scene.cycles.device = 'CPU'
-                            scene.cycles.tile_size = 512  # CPU优化tile大小
-                            print('    Using CPU (no GPU devices found)')
-            except Exception as e:
-                # 如果所有方法都失败，尝试直接设置GPU
+                scene.cycles.sampling_pattern = 'TABULATED_SOBOL'
+            except (ValueError, TypeError):
+                pass
+        
+        # 使用GPU加速（如果可用）
+        try:
+            prefs = bpy.context.preferences
+            cycles_prefs = prefs.addons['cycles'].preferences
+            devices = cycles_prefs.get_devices()
+            
+            if devices is None:
                 try:
                     scene.cycles.device = 'GPU'
                     scene.cycles.tile_size = 256
-                    print(f'    Using GPU (fallback method, error: {e})')
+                    print('    Using GPU (device type set to GPU)')
                 except:
                     scene.cycles.device = 'CPU'
                     scene.cycles.tile_size = 512
-                    print(f'    Using CPU (GPU configuration failed: {e})')
+                    print('    Using CPU (could not set GPU device type)')
+            else:
+                gpu_devices = []
+                for device in devices:
+                    if device and device.type in ('CUDA', 'OPENCL', 'OPTIX', 'HIP', 'METAL', 'ONEAPI'):
+                        if not device.use:
+                            device.use = True
+                        gpu_devices.append(device)
+                
+                has_gpu = len(gpu_devices) > 0
+                
+                if has_gpu:
+                    scene.cycles.device = 'GPU'
+                    scene.cycles.tile_size = 256
+                    device_names = [f"{d.name} ({d.type})" for d in gpu_devices if d.use]
+                    print(f'    Using GPU: {", ".join(device_names)}')
+                else:
+                    try:
+                        scene.cycles.device = 'GPU'
+                        scene.cycles.tile_size = 256
+                        print('    Using GPU (device list empty, but GPU mode enabled)')
+                    except:
+                        scene.cycles.device = 'CPU'
+                        scene.cycles.tile_size = 512
+                        print('    Using CPU (no GPU devices found)')
+        except Exception as e:
+            try:
+                scene.cycles.device = 'GPU'
+                scene.cycles.tile_size = 256
+                print(f'    Using GPU (fallback method, error: {e})')
+            except:
+                scene.cycles.device = 'CPU'
+                scene.cycles.tile_size = 512
+                print(f'    Using CPU (GPU configuration failed: {e})')
         
         # 设置输出格式
         scene.render.image_settings.file_format = 'PNG'
         scene.render.image_settings.color_mode = 'RGB'
-        scene.render.image_settings.color_depth = '16'
+        scene.render.image_settings.color_depth = '8'
         
         # 禁用不必要的功能以提升性能
         scene.render.use_motion_blur = False  # 关闭运动模糊
@@ -360,9 +340,8 @@ class BlenderPointCloudRenderer:
         bg.inputs["Color"].default_value = (0.0, 0.0, 0.0, 1.0)  # 黑色背景
         bg.inputs["Strength"].default_value = 0.0
         
-        # 添加环境光（Cycles）
-        if self.engine == 'cycles':
-            bg.inputs["Strength"].default_value = 1.5  # 增加环境光强度以提升整体亮度
+        # 添加环境光
+        bg.inputs["Strength"].default_value = 1.5
         
         return scene
     
@@ -380,9 +359,9 @@ class BlenderPointCloudRenderer:
         
         # 使用更对称的相机位置（等距视角）
         camera_origin = center + np.array([
-            camera_distance * 1.0,   # X方向：右侧
-            camera_distance * 1.0,   # Y方向：前方
-            camera_distance * 0.6    # Z方向：稍微上方
+            camera_distance * 0.7,   # X方向：右侧
+            camera_distance * 0.7,   # Y方向：前方
+            camera_distance * 0.5    # Z方向：稍微上方
         ])
         
         # 转换为Blender Vector
@@ -411,7 +390,7 @@ class BlenderPointCloudRenderer:
         
         # 微调相机shift以确保点云完全居中（shift_x和shift_y用于微调构图）
         # 如果点云偏左，可以稍微向右shift
-        camera.data.shift_x = 0.0  # 水平微调（正值向右，负值向左）
+        camera.data.shift_x = -0.02  # 水平微调（正值向右，负值向左）
         camera.data.shift_y = 0.0  # 垂直微调（正值向上，负值向下）
         
         # 设置活动相机
@@ -778,8 +757,6 @@ def batch_render(input_folder='trajectory_ply',
                  image_width=1920,
                  image_height=1080,
                  samples=64,
-                 engine='cycles',
-                 blender_path=None,
                  use_batch_rendering=False,
                  single_batch_id=None,
                  max_batches=None,
@@ -797,8 +774,6 @@ def batch_render(input_folder='trajectory_ply',
         image_width: 图像宽度
         image_height: 图像高度
         samples: 采样数（Cycles渲染引擎）
-        engine: 渲染引擎 ('cycles' 或 'eevee')
-        blender_path: Blender可执行文件路径（如果通过命令行调用）
         use_batch_rendering: 是否使用基于batch_idx的分批渲染
         single_batch_id: 如果指定，只渲染这个batch ID（用于测试，需要use_batch_rendering=True）
         max_batches: 如果指定，最多渲染这么多batch（用于测试，需要use_batch_rendering=True）
@@ -846,7 +821,7 @@ def batch_render(input_folder='trajectory_ply',
     print(f'Output folder: {output_folder}')
     print(f'Image size: {image_width}x{image_height}')
     print(f'Samples per pixel: {samples}')
-    print(f'Render engine: {engine}')
+    print(f'Render engine: Cycles')
     print(f'Particle color: RGB{particle_color}')
     if use_batch_rendering:
         if single_batch_id is not None:
@@ -876,7 +851,6 @@ def batch_render(input_folder='trajectory_ply',
                 image_width=image_width,
                 image_height=image_height,
                 samples=samples,
-                engine=engine,
                 max_points=max_points,
                 particle_color=particle_color
             )
@@ -938,10 +912,7 @@ if __name__ == '__main__':
     parser.add_argument('--height', type=int, default=1080,
                         help='Image height')
     parser.add_argument('--samples', type=int, default=64,
-                        help='Samples per pixel (Cycles engine, default: 64)')
-    parser.add_argument('--engine', type=str, default='cycles',
-                        choices=['cycles', 'eevee'],
-                        help='Render engine: cycles or eevee (default: cycles)')
+                        help='Samples per pixel (default: 64)')
     parser.add_argument('--use-batch-rendering', action='store_true',
                         help='Use batch_idx-based batch rendering (256 batches, 2048 particles each)')
     parser.add_argument('--single-batch', type=int, default=None,
@@ -982,7 +953,6 @@ if __name__ == '__main__':
         image_width=args.width,
         image_height=args.height,
         samples=args.samples,
-        engine=args.engine,
         use_batch_rendering=args.use_batch_rendering,
         single_batch_id=args.single_batch,
         max_batches=args.max_batches,
