@@ -268,16 +268,8 @@ class BlenderPointCloudRenderer:
             scene.cycles.use_persistent_data = True
             
             # 优化tile大小（GPU建议256，CPU建议512）
-            # 根据设备类型自动调整
-            try:
-                prefs = bpy.context.preferences
-                cycles_prefs = prefs.addons['cycles'].preferences
-                devices = cycles_prefs.get_devices()
-                has_gpu = any(device.type == 'CUDA' or device.type == 'OPENCL' or device.type == 'OPTIX' 
-                             for device in devices if device.use)
-                scene.cycles.tile_size = 256 if has_gpu else 512  # GPU用256，CPU用512
-            except:
-                scene.cycles.tile_size = 256
+            # 根据设备类型自动调整（在GPU设置之后进行）
+            # 注意：tile_size会在GPU设置后根据实际设备类型调整
             
             # 简化视口预览
             scene.cycles.preview_samples = 16
@@ -296,11 +288,30 @@ class BlenderPointCloudRenderer:
                 prefs = bpy.context.preferences
                 cycles_prefs = prefs.addons['cycles'].preferences
                 devices = cycles_prefs.get_devices()
-                has_gpu = any(device.type == 'CUDA' or device.type == 'OPENCL' or device.type == 'OPTIX' 
-                             for device in devices if device.use)
-                scene.cycles.device = 'GPU' if has_gpu else 'CPU'
-            except:
+                
+                # 查找可用的GPU设备并启用
+                gpu_devices = []
+                for device in devices:
+                    if device.type in ('CUDA', 'OPENCL', 'OPTIX', 'HIP', 'METAL', 'ONEAPI'):
+                        if not device.use:
+                            device.use = True  # 启用GPU设备
+                        gpu_devices.append(device)
+                
+                has_gpu = len(gpu_devices) > 0
+                
+                if has_gpu:
+                    scene.cycles.device = 'GPU'
+                    scene.cycles.tile_size = 256  # GPU优化tile大小
+                    device_names = [f"{d.name} ({d.type})" for d in gpu_devices if d.use]
+                    print(f'    Using GPU: {", ".join(device_names)}')
+                else:
+                    scene.cycles.device = 'CPU'
+                    scene.cycles.tile_size = 512  # CPU优化tile大小
+                    print('    Using CPU (no GPU devices found)')
+            except Exception as e:
                 scene.cycles.device = 'CPU'
+                scene.cycles.tile_size = 512
+                print(f'    Warning: Could not configure GPU, using CPU: {e}')
         
         # 设置输出格式
         scene.render.image_settings.file_format = 'PNG'
