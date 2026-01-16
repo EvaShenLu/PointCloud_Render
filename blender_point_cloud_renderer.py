@@ -1,6 +1,5 @@
 import numpy as np
 import os
-import sys
 
 # 尝试导入bpy（Blender Python API）
 try:
@@ -14,8 +13,7 @@ except ImportError:
 
 class BlenderPointCloudRenderer:
     """
-    使用Blender Python API的点云渲染器
-    纯点云渲染，所有粒子使用相同颜色，使用Blender的高效实例化功能渲染
+    Blender Python API 
     """
     
     def __init__(self, file_path, output_folder=None, 
@@ -32,7 +30,7 @@ class BlenderPointCloudRenderer:
             particle_radius: 粒子半径（None表示自适应）
             image_width: 图像宽度
             image_height: 图像高度
-            samples: 采样数（Cycles渲染引擎）
+            samples: 采样数
             max_points: 最大点数（None表示不限制，用于LOD降采样）
             particle_color: 粒子颜色 (R, G, B)，范围[0, 1]，默认灰色(0.3, 0.3, 0.3)
         """
@@ -95,8 +93,8 @@ class BlenderPointCloudRenderer:
             
         Returns:
             positions: (N, 3) 位置数组
-            normals: (N, 3) 法向量数组（虽然不使用，但保持接口一致）
-            batch_indices: (N,) 批次索引数组或None
+            normals: (N, 3) 法向量数组（不使用，保持接口一致）
+            batch_indices: (N,) 批次索引数组
         """
         dtype = np.dtype([
             ('x', '<f4'),      # little-endian float32
@@ -121,10 +119,7 @@ class BlenderPointCloudRenderer:
         return positions, normals, batch_indices
     
     def load_point_cloud(self):
-        """
-        加载PLY文件，返回位置、法向量和批次索引
-        （法向量虽然不使用，但保持接口一致）
-        """
+        """加载PLY文件，返回位置、法向量和批次索引"""
         file_extension = os.path.splitext(self.file_path)[1]
         
         if file_extension == '.ply':
@@ -144,7 +139,7 @@ class BlenderPointCloudRenderer:
         
         Args:
             positions: (N, 3) 位置数组
-            normals: (N, 3) 法向量数组（虽然不使用，但保持接口一致）
+            normals: (N, 3) 法向量数组（不使用，保持接口一致）
             target_points: 目标点数
             
         Returns:
@@ -176,8 +171,8 @@ class BlenderPointCloudRenderer:
         bbox_size = np.max(bbox_max - bbox_min)
         num_points = len(positions)
         
-        radius = bbox_size / (num_points ** 0.33) * 0.30  # 增加系数以放大粒子
-        radius = max(0.005, min(radius, 0.035))  # 增加最小和最大半径限制
+        radius = bbox_size / (num_points ** 0.33) * 0.30
+        radius = max(0.005, min(radius, 0.035))
         
         return radius
     
@@ -218,53 +213,29 @@ class BlenderPointCloudRenderer:
         scene = bpy.context.scene
         scene.render.engine = 'CYCLES'
         
-        # 调整曝光以提升整体亮度
-        if hasattr(scene.view_settings, 'exposure'):
-            scene.view_settings.exposure = 0.5
-        if hasattr(scene.view_settings, 'gamma'):
-            scene.view_settings.gamma = 1.2
-        
         # 设置渲染分辨率
         scene.render.resolution_x = self.image_width
         scene.render.resolution_y = self.image_height
         scene.render.resolution_percentage = 100
         
         # 设置Cycles渲染参数
-        # 使用传入的采样数，但设置合理的最小值
-        scene.cycles.samples = max(self.samples, 32)
-        
-        # 使用自适应采样（平衡质量和速度）
+        scene.cycles.samples = max(self.samples, 64)
         scene.cycles.use_adaptive_sampling = True
-        scene.cycles.adaptive_threshold = 0.05
-        
-        # 启用降噪以减少噪点（允许较低采样数）
+        scene.cycles.adaptive_threshold = 0.03
         scene.cycles.use_denoising = True
-        # 使用OpenImageDenoise（如果可用）
         if hasattr(scene.cycles, 'denoiser'):
             scene.cycles.denoiser = 'OPENIMAGEDENOISE'
-        
-        # 简化光线追踪：对于点云，光线弹射1次足够
-        scene.cycles.max_bounces = 1
-        scene.cycles.diffuse_bounces = 0
-        scene.cycles.glossy_bounces = 0
+        scene.cycles.max_bounces = 2
+        scene.cycles.diffuse_bounces = 1
+        scene.cycles.glossy_bounces = 1
         scene.cycles.transparent_max_bounces = 1
         scene.cycles.transmission_bounces = 0
-        
-        # 关闭Caustics（焦散）- 点云不需要，可以提升性能
         scene.cycles.caustics_reflective = False
         scene.cycles.caustics_refractive = False
-        
-        # 启用快速GI近似
         scene.cycles.use_fast_gi = True
         scene.cycles.fast_gi_method = 'REPLACE'
-        
-        # 使用Persistent Data（如果显存足够，保持静态BVH数据）
-        scene.cycles.use_persistent_data = True
-        
-        # 简化视口预览
+        scene.cycles.use_persistent_data = False
         scene.cycles.preview_samples = 16
-        
-        # 优化采样模式（使用更快的采样器）
         if hasattr(scene.cycles, 'sampling_pattern'):
             try:
                 scene.cycles.sampling_pattern = 'TABULATED_SOBOL'
@@ -320,15 +291,12 @@ class BlenderPointCloudRenderer:
                 scene.cycles.tile_size = 512
                 print(f'    Using CPU (GPU configuration failed: {e})')
         
-        # 设置输出格式
         scene.render.image_settings.file_format = 'PNG'
         scene.render.image_settings.color_mode = 'RGB'
         scene.render.image_settings.color_depth = '8'
         
-        # 禁用不必要的功能以提升性能
-        scene.render.use_motion_blur = False  # 关闭运动模糊
+        scene.render.use_motion_blur = False
         
-        # 设置世界背景
         world = scene.world
         if world is None:
             world = bpy.data.worlds.new("World")
@@ -337,46 +305,38 @@ class BlenderPointCloudRenderer:
         bg = world.node_tree.nodes.get("Background")
         if bg is None:
             bg = world.node_tree.nodes.new("ShaderNodeBackground")
-        bg.inputs["Color"].default_value = (0.0, 0.0, 0.0, 1.0)  # 黑色背景
-        bg.inputs["Strength"].default_value = 0.0
-        
-        # 添加环境光
-        bg.inputs["Strength"].default_value = 1.5
+        bg.inputs["Color"].default_value = (0.0, 0.0, 0.0, 1.0)
+        bg.inputs["Strength"].default_value = 20.0
         
         return scene
     
-    def setup_camera(self, center, bbox_size):
+    def setup_camera(self, center, bbox_size, camera_position=None):
         """
         设置相机位置和朝向
         
         Args:
             center: 点云中心点 (3,)
             bbox_size: 边界框大小
+            camera_position: 相机位置 (3,)，如果为None则根据bbox_size计算
         """
-        # 计算相机位置：使用对称的位置，确保点云居中
-        # 标准化后的点云中心应该在原点，所以center应该是[0, 0, 0]
-        camera_distance = bbox_size * 3.5
+        if camera_position is None:
+            camera_distance = bbox_size * 5.5
+            camera_origin = center + np.array([
+                camera_distance * 0.7,
+                camera_distance * 0.7,
+                camera_distance * 0.5
+            ])
+        else:
+            camera_origin = camera_position
         
-        # 使用更对称的相机位置（等距视角）
-        camera_origin = center + np.array([
-            camera_distance * 0.7,   # X方向：右侧
-            camera_distance * 0.7,   # Y方向：前方
-            camera_distance * 0.5    # Z方向：稍微上方
-        ])
-        
-        # 转换为Blender Vector
         center_vec = Vector(center)
         camera_origin_vec = Vector(camera_origin)
         
-        # 创建或获取相机
         if 'Camera' not in bpy.data.objects:
             bpy.ops.object.camera_add()
         camera = bpy.data.objects['Camera']
-        
-        # 设置相机位置
         camera.location = camera_origin_vec
         
-        # 设置相机朝向：看向点云中心
         direction = center_vec - camera_origin_vec
         if direction.length > 0:
             rot_quat = direction.to_track_quat('-Z', 'Y')
@@ -384,18 +344,10 @@ class BlenderPointCloudRenderer:
         else:
             camera.rotation_euler = (np.radians(90), 0, 0)
         
-        # 设置相机参数
         camera.data.type = 'PERSP'
         camera.data.angle = np.radians(30)
         
-        # 微调相机shift以确保点云完全居中（shift_x和shift_y用于微调构图）
-        # 如果点云偏左，可以稍微向右shift
-        camera.data.shift_x = -0.02  # 水平微调（正值向右，负值向左）
-        camera.data.shift_y = 0.0  # 垂直微调（正值向上，负值向下）
-        
-        # 设置活动相机
         bpy.context.scene.camera = camera
-        
         return camera
     
     def add_environment(self, bbox_min, bbox_max, center, bbox_size):
@@ -408,26 +360,23 @@ class BlenderPointCloudRenderer:
             center: 点云中心点 (3,)
             bbox_size: 边界框大小
         """
-        # 创建白色背景板（地板）
         floor_z = float(bbox_min[2] - bbox_size * 0.1)
         bpy.ops.mesh.primitive_plane_add(
-            size=bbox_size * 12,  # 增大背景板尺寸
+            size=bbox_size * 12,
             location=(float(center[0]), float(center[1]), floor_z)
         )
         floor = bpy.context.active_object
         floor.name = "BackgroundFloor"
         
-        # 创建白色背景板材质
         floor_mat = bpy.data.materials.new(name="BackgroundFloorMaterial")
         floor_mat.use_nodes = True
         bsdf = floor_mat.node_tree.nodes.get("Principled BSDF")
         if bsdf:
-            bsdf.inputs["Base Color"].default_value = (1.0, 1.0, 1.0, 1.0)  # 纯白色
+            bsdf.inputs["Base Color"].default_value = (1.0, 1.0, 1.0, 1.0)
             bsdf.inputs["Roughness"].default_value = 0.9
             bsdf.inputs["Metallic"].default_value = 0.0
         floor.data.materials.append(floor_mat)
         
-        # 添加顶部光源（环境光已在init_blender_scene中设置）
         bpy.ops.object.light_add(type='AREA', location=(
             float(center[0]), 
             float(center[1]), 
@@ -435,7 +384,7 @@ class BlenderPointCloudRenderer:
         ))
         top_light = bpy.context.active_object
         top_light.name = "TopLight"
-        top_light.data.energy = 150.0  # 增加顶部光源亮度
+        top_light.data.energy = 300.0
         top_light.data.size = bbox_size * 1.5
         top_light.rotation_euler = (0, 0, 0)
     
@@ -446,7 +395,7 @@ class BlenderPointCloudRenderer:
         
         Args:
             positions: (N, 3) 位置数组
-            normals: (N, 3) 法向量数组（不使用，但保持接口一致）
+            normals: (N, 3) 法向量数组
             radius: 粒子半径
         """
         num_points = len(positions)
@@ -462,18 +411,15 @@ class BlenderPointCloudRenderer:
         
         mesh.update()
         
-        # 创建材质（使用单一颜色）
         mat = bpy.data.materials.new(name="PointCloudMaterial")
         mat.use_nodes = True
         bsdf = mat.node_tree.nodes.get("Principled BSDF")
         if bsdf is None:
             bsdf = mat.node_tree.nodes.new("ShaderNodeBsdfPrincipled")
         
-        # 设置基础颜色为单一颜色
         if bsdf and "Base Color" in bsdf.inputs:
             bsdf.inputs["Base Color"].default_value = (*self.particle_color, 1.0)
         
-        # 设置自发光（适中的自发光强度）
         if bsdf:
             if "Emission Strength" in bsdf.inputs:
                 bsdf.inputs["Emission Strength"].default_value = 0.3
@@ -499,32 +445,22 @@ class BlenderPointCloudRenderer:
                 sphere_node = node_group.nodes.new('GeometryNodeMeshIcoSphere')
                 
                 sphere_node.inputs['Radius'].default_value = radius
-                sphere_node.inputs['Subdivisions'].default_value = 1  # 降低细分以提升渲染速度
+                sphere_node.inputs['Subdivisions'].default_value = 1
                 
-                # 连接：输入几何体 -> InstanceOnPoints
                 node_group.links.new(input_node.outputs['Geometry'], instance_node.inputs['Points'])
                 node_group.links.new(sphere_node.outputs['Mesh'], instance_node.inputs['Instance'])
                 
-                # --- [简化流程开始] ---
-                
-                # 1. Realize Instances (实现实例)
                 realize_node = node_group.nodes.new('GeometryNodeRealizeInstances')
                 node_group.links.new(instance_node.outputs['Instances'], realize_node.inputs['Geometry'])
                 
-                # 2. Set Material (设置材质) - 这一步至关重要！
-                # Realize Instances 后材质经常丢失，必须在这里显式指定
                 set_mat_node = node_group.nodes.new('GeometryNodeSetMaterial')
                 set_mat_node.inputs['Material'].default_value = mat
                 node_group.links.new(realize_node.outputs['Geometry'], set_mat_node.inputs['Geometry'])
                 
-                # 3. Output (输出)
                 node_group.links.new(set_mat_node.outputs['Geometry'], output_node.inputs['Geometry'])
-                
-                # --- [简化流程结束] ---
                 
                 mod = obj.modifiers.new(name="PointInstances", type='NODES')
                 mod.node_group = node_group
-                print(f'    Geometry Nodes modifier created (Simplified: Instance -> Realize -> SetMaterial)')
             except Exception as e:
                 print(f"Warning: Could not create Geometry Nodes modifier: {e}")
                 import traceback
@@ -533,21 +469,21 @@ class BlenderPointCloudRenderer:
         return obj
     
     def build_scene(self, positions, normals, radius, bbox_min=None, bbox_max=None, 
-                    center=None, bbox_size=None, add_environment=True):
+                    center=None, bbox_size=None, add_environment=True, camera_position=None):
         """
         构建Blender场景
         
         Args:
             positions: (N, 3) 位置数组
-            normals: (N, 3) 法向量数组（不使用，但保持接口一致）
+            normals: (N, 3) 法向量数组
             radius: 粒子半径
             bbox_min: 边界框最小值（可选）
             bbox_max: 边界框最大值（可选）
             center: 点云中心（可选）
             bbox_size: 边界框大小（可选）
             add_environment: 是否添加地板和背景光源
+            camera_position: 相机位置 (3,)，如果为None则根据bbox_size计算
         """
-        # 计算点云边界框
         if bbox_min is None or bbox_max is None:
             bbox_min = np.min(positions, axis=0)
             bbox_max = np.max(positions, axis=0)
@@ -556,25 +492,20 @@ class BlenderPointCloudRenderer:
         if bbox_size is None:
             bbox_size = np.max(bbox_max - bbox_min)
         
-        # 初始化场景
         scene = self.init_blender_scene()
+        self.setup_camera(center, bbox_size, camera_position)
         
-        # 设置相机
-        self.setup_camera(center, bbox_size)
-        
-        # 创建点云（所有粒子使用相同颜色）
         print(f'    Creating point cloud with {len(positions):,} points...', end=' ', flush=True)
         self.create_point_cloud_simple(positions, normals, radius)
         print('Done')
         
-        # 添加环境（地板和背景光源）
         if add_environment:
             self.add_environment(bbox_min, bbox_max, center, bbox_size)
         
         return scene
     
     def render(self, positions, normals, batch_indices=None, use_batch_rendering=False,
-               single_batch_id=None, max_batches=None):
+               single_batch_id=None, max_batches=None, camera_position=None):
         """
         渲染点云
         所有粒子使用相同的颜色
@@ -584,24 +515,25 @@ class BlenderPointCloudRenderer:
             normals: (N, 3) 法向量数组（不使用，但保持接口一致）
             batch_indices: (N,) 批次索引数组（可选）
             use_batch_rendering: 是否使用分批渲染（基于batch_idx）
-            single_batch_id: 如果指定，只渲染这个batch ID（用于测试）
-            max_batches: 如果指定，最多渲染这么多batch（用于测试）
+            single_batch_id
+            max_batches
+            camera_position: 相机位置 (3,)，如果为None则根据bbox_size计算
             
         Returns:
             image_path: 渲染图像的路径
         """
-        # 降采样点云（如果设置了max_points）
         if self.max_points is not None and len(positions) > self.max_points:
             print(f'  Downsampling from {len(positions):,} to {self.max_points:,} points...', end=' ', flush=True)
             positions, normals = self.downsample_points(positions, normals, self.max_points)
             print('Done')
         
-        # 标准化点云位置
         print('  Standardizing point cloud...', end=' ', flush=True)
         positions_std, center, scale = self.standardize_point_cloud(positions)
+        positions_std[:, 2] = -positions_std[:, 2]  # 上下翻转
+        positions_std[:, 0] = -positions_std[:, 0]  # Z轴旋转180度
+        positions_std[:, 1] = -positions_std[:, 1]
         print('Done')
         
-        # 计算粒子半径
         print('  Computing particle radius...', end=' ', flush=True)
         if self.particle_radius is None:
             radius = self.compute_adaptive_radius(positions_std)
@@ -609,42 +541,35 @@ class BlenderPointCloudRenderer:
             radius = self.particle_radius
         print(f'Done (radius={radius:.6f})')
         
-        # 计算全局边界框（用于保持场景一致性）
         bbox_min = np.min(positions_std, axis=0)
         bbox_max = np.max(positions_std, axis=0)
         bbox_center = (bbox_min + bbox_max) * 0.5
         bbox_size = np.max(bbox_max - bbox_min)
         
-        # 如果使用分批渲染且batch_indices可用
         if use_batch_rendering and batch_indices is not None:
             return self._render_batched_by_batch_idx(
                 positions_std, normals, radius, batch_indices,
                 bbox_min, bbox_max, bbox_center, bbox_size,
                 single_batch_id=single_batch_id,
-                max_batches=max_batches
+                max_batches=max_batches,
+                camera_position=camera_position
             )
         
-        # 一次性渲染所有粒子
         print('  Building Blender scene...', flush=True)
         self.build_scene(positions_std, normals, radius, 
                         bbox_min, bbox_max, bbox_center, bbox_size,
-                        add_environment=True)
+                        add_environment=True, camera_position=camera_position)
         
-        # 渲染场景
         print('  Rendering scene...', end=' ', flush=True)
         
-        # 设置输出路径
         if self.output_folder:
             os.makedirs(self.output_folder, exist_ok=True)
             output_file_path = os.path.join(self.output_folder, self.filename)
         else:
             output_file_path = os.path.join(self.folder, self.filename)
         
-        # 设置渲染输出路径
         scene = bpy.context.scene
         scene.render.filepath = output_file_path
-        
-        # 执行渲染
         bpy.ops.render.render(write_still=True)
         
         print(f'Done -> {os.path.basename(output_file_path)}.png')
@@ -653,7 +578,7 @@ class BlenderPointCloudRenderer:
     
     def _render_batched_by_batch_idx(self, positions, normals, radius, batch_indices,
                                      bbox_min, bbox_max, center, bbox_size,
-                                     single_batch_id=None, max_batches=None):
+                                     single_batch_id=None, max_batches=None, camera_position=None):
         """
         按batch_idx收集粒子并一次性渲染
         所有粒子使用相同的颜色
@@ -669,16 +594,15 @@ class BlenderPointCloudRenderer:
             bbox_size: 全局边界框大小
             single_batch_id: 如果指定，只渲染这个batch ID（用于测试）
             max_batches: 如果指定，最多渲染这么多batch（用于测试）
+            camera_position: 相机位置 (3,)，如果为None则根据bbox_size计算
             
         Returns:
             image_path: 渲染图像的路径
         """
-        # 获取唯一的批次ID并排序
         unique_batches = np.unique(batch_indices)
         unique_batches = np.sort(unique_batches)
         total_batches = len(unique_batches)
         
-        # 确定要渲染的batch列表
         if single_batch_id is not None:
             if single_batch_id not in unique_batches:
                 raise ValueError(f'Batch ID {single_batch_id} not found. Available batch IDs: {unique_batches[0]} to {unique_batches[-1]}')
@@ -686,7 +610,6 @@ class BlenderPointCloudRenderer:
             num_batches = 1
             print(f'  Collecting particles from batch {single_batch_id}...')
         elif max_batches is not None:
-            # 限制渲染的batch数量
             selected_batches = unique_batches[:max_batches]
             num_batches = len(selected_batches)
             print(f'  Collecting particles from {num_batches} batches (out of {total_batches} total)...')
@@ -695,35 +618,28 @@ class BlenderPointCloudRenderer:
             num_batches = total_batches
             print(f'  Collecting particles from all {num_batches} batches...')
         
-        # 收集所有指定batch的粒子
         batch_mask = np.isin(batch_indices, selected_batches)
         selected_positions = positions[batch_mask]
-        selected_normals = normals[batch_mask]  # 保持与positions的对应关系（虽然不使用）
+        selected_normals = normals[batch_mask]
         num_particles = len(selected_positions)
         
         print(f'  Total particles to render: {num_particles:,}')
         
-        # 一次性构建场景并渲染
         print('  Building Blender scene...', flush=True)
         self.build_scene(selected_positions, selected_normals, radius,
                         bbox_min, bbox_max, center, bbox_size,
-                        add_environment=True)
+                        add_environment=True, camera_position=camera_position)
         
-        # 渲染场景
         print('  Rendering scene...', end=' ', flush=True)
         
-        # 设置输出路径
         if self.output_folder:
             os.makedirs(self.output_folder, exist_ok=True)
             output_file_path = os.path.join(self.output_folder, self.filename)
         else:
             output_file_path = os.path.join(self.folder, self.filename)
         
-        # 设置渲染输出路径
         scene = bpy.context.scene
         scene.render.filepath = output_file_path
-        
-        # 执行渲染
         bpy.ops.render.render(write_still=True)
         
         print(f'Done -> {os.path.basename(output_file_path)}.png')
@@ -739,13 +655,9 @@ class BlenderPointCloudRenderer:
             single_batch_id: 如果指定，只渲染这个batch ID（用于测试）
             max_batches: 如果指定，最多渲染这么多batch（用于测试）
         """
-        # 加载点云
         positions, normals, batch_indices = self.load_point_cloud()
-        
-        # 渲染
         image_path = self.render(positions, normals, batch_indices, 
                                 use_batch_rendering, single_batch_id, max_batches)
-        
         return image_path
 
 
@@ -795,14 +707,11 @@ def batch_render(input_folder='trajectory_ply',
         print(f'No files found matching pattern: {os.path.join(input_folder, pattern)}')
         return
     
-    # 过滤帧范围
     if start_frame is not None or end_frame is not None:
         filtered_files = []
         for f in ply_files:
-            # 从文件名提取帧号
             basename = os.path.basename(f)
             try:
-                # 假设文件名格式为 frame_XXXX.ply
                 frame_num = int(basename.split('_')[1].split('.')[0])
                 if start_frame is not None and frame_num < start_frame:
                     continue
@@ -810,7 +719,6 @@ def batch_render(input_folder='trajectory_ply',
                     continue
                 filtered_files.append(f)
             except:
-                # 如果无法解析帧号，包含该文件
                 filtered_files.append(f)
         ply_files = filtered_files
     
@@ -834,12 +742,81 @@ def batch_render(input_folder='trajectory_ply',
     
     os.makedirs(output_folder, exist_ok=True)
     
+    # 预计算相机位置：使用第0帧和第299帧
+    camera_positions = {}
+    frame_0_file = None
+    frame_299_file = None
+    
+    # 查找第0帧和第299帧的文件
+    for ply_file in ply_files:
+        basename = os.path.basename(ply_file)
+        try:
+            frame_num = int(basename.split('_')[1].split('.')[0])
+            if frame_num == 0:
+                frame_0_file = ply_file
+            elif frame_num == 299:
+                frame_299_file = ply_file
+        except:
+            pass
+    
+    # 计算第0帧和第299帧的相机位置
+    if frame_0_file and frame_299_file:
+        print('=' * 60)
+        print('Precomputing camera positions from frame 0 and 299...')
+        print('=' * 60)
+        
+        for frame_file, frame_id in [(frame_0_file, 0), (frame_299_file, 299)]:
+            temp_renderer = BlenderPointCloudRenderer(
+                frame_file,
+                output_folder=None,
+                image_width=image_width,
+                image_height=image_height,
+                samples=samples,
+                max_points=max_points,
+                particle_color=particle_color
+            )
+            positions, normals, _ = temp_renderer.load_point_cloud()
+            
+            if temp_renderer.max_points is not None and len(positions) > temp_renderer.max_points:
+                positions, normals = temp_renderer.downsample_points(positions, normals, temp_renderer.max_points)
+            
+            positions_std, center, scale = temp_renderer.standardize_point_cloud(positions)
+            positions_std[:, 2] = -positions_std[:, 2]
+            positions_std[:, 0] = -positions_std[:, 0]
+            positions_std[:, 1] = -positions_std[:, 1]
+            
+            bbox_min = np.min(positions_std, axis=0)
+            bbox_max = np.max(positions_std, axis=0)
+            bbox_center = (bbox_min + bbox_max) * 0.5
+            bbox_size = np.max(bbox_max - bbox_min)
+            
+            # 第0帧使用更远的距离，第299帧使用正常距离
+            if frame_id == 0:
+                camera_distance = bbox_size * 5.5  # 第0帧拉远
+            else:
+                camera_distance = bbox_size * 3.5  # 第299帧正常距离
+            
+            camera_pos = bbox_center + np.array([
+                camera_distance * 0.7,
+                camera_distance * 0.7,
+                camera_distance * 0.5
+            ])
+            camera_positions[frame_id] = camera_pos
+            print(f'  Frame {frame_id}: camera position = ({camera_pos[0]:.3f}, {camera_pos[1]:.3f}, {camera_pos[2]:.3f})')
+        
+        print('=' * 60)
+    
     successful = 0
     failed = 0
     
-    # 批量渲染
     for idx, ply_file in enumerate(ply_files, 1):
         basename = os.path.basename(ply_file)
+        
+        # 从文件名提取帧号
+        try:
+            frame_num = int(basename.split('_')[1].split('.')[0])
+        except:
+            frame_num = None
         
         print(f'\n[{idx}/{total_files}] ({idx*100//total_files}%) Processing: {basename}')
         print('-' * 60)
@@ -855,26 +832,42 @@ def batch_render(input_folder='trajectory_ply',
                 particle_color=particle_color
             )
             
-            # 加载点云
             print('  Loading point cloud...', end=' ', flush=True)
             positions, normals, batch_indices = renderer.load_point_cloud()
             print(f'Done ({len(positions):,} points)')
             
-            # 处理和渲染
-            image_path = renderer.render(positions, normals, batch_indices, 
-                                        use_batch_rendering, single_batch_id, max_batches)
+            # 计算当前帧的相机位置（如果在0-299帧之间进行插值）
+            camera_position = None
+            if frame_num is not None and 0 in camera_positions and 299 in camera_positions:
+                if frame_num == 0:
+                    camera_position = camera_positions[0]
+                elif frame_num == 299:
+                    camera_position = camera_positions[299]
+                elif 0 < frame_num < 299:
+                    progress = frame_num / 299.0
+                    start_pos = camera_positions[0]
+                    end_pos = camera_positions[299]
+                    camera_position = start_pos + (end_pos - start_pos) * progress
+                    print(f'  Using interpolated camera position (progress: {progress:.3f})')
+                else:
+                    camera_position = camera_positions[299]  # 299帧之后使用第299帧的位置
             
-            # 清理场景（为下一个文件准备）
+            image_path = renderer.render(positions, normals, batch_indices, 
+                                        use_batch_rendering, single_batch_id, max_batches,
+                                        camera_position=camera_position)
+            
             bpy.ops.object.select_all(action='SELECT')
             bpy.ops.object.delete(use_global=False)
             
-            # 清理未使用的数据块
             for block in bpy.data.meshes:
                 if block.users == 0:
                     bpy.data.meshes.remove(block)
             for block in bpy.data.materials:
                 if block.users == 0:
                     bpy.data.materials.remove(block)
+            for block in bpy.data.node_groups:
+                if block.users == 0:
+                    bpy.data.node_groups.remove(block)
             
             successful += 1
             print(f'  ✓ Successfully processed: {basename}')
@@ -926,7 +919,6 @@ if __name__ == '__main__':
                         help='Particle color RGB values (0.0-1.0, default: 0.3 0.3 0.3 for gray)')
     args = parser.parse_args()
     
-    # 验证参数
     if args.single_batch is not None and not args.use_batch_rendering:
         print('Warning: --single-batch requires --use-batch-rendering. Ignoring --single-batch.')
         args.single_batch = None
@@ -939,7 +931,6 @@ if __name__ == '__main__':
         print('Warning: --single-batch and --max-batches cannot be used together. Using --single-batch.')
         args.max_batches = None
     
-    # 验证颜色值范围
     particle_color = tuple(np.clip(args.color, 0.0, 1.0))
     if particle_color != tuple(args.color):
         print(f'Warning: Color values clipped to [0.0, 1.0]: {particle_color}')
