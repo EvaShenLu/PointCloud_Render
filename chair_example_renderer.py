@@ -17,15 +17,15 @@ class XMLTemplates:
         <float name="farClip" value="100"/>
         <float name="nearClip" value="0.1"/>
         <transform name="toWorld">
-            <lookat origin="2,2,2" target="0,0,0" up="0,0,1"/>
+            <lookat origin="2.0,2.0,2.2" target="0,0,0" up="0,0,1"/>
         </transform>
         <float name="fov" value="30"/>
         <sampler type="independent">
             <integer name="sampleCount" value="256"/>
         </sampler>
         <film type="hdrfilm">
-            <integer name="width" value="1920"/>
-            <integer name="height" value="1080"/>
+            <integer name="width" value="1440"/>
+            <integer name="height" value="1440"/>
             <rfilter type="gaussian"/>
         </film>
     </sensor>
@@ -40,7 +40,7 @@ class XMLTemplates:
     # XML template for a single point (ball) in the scene
     BALL_SEGMENT = """
     <shape type="sphere">
-        <float name="radius" value="0.015"/>
+        <float name="radius" value="0.02"/>
         <transform name="toWorld">
             <translate x="{}" y="{}" z="{}"/>
         </transform>
@@ -64,7 +64,7 @@ class XMLTemplates:
     <shape type="rectangle">
         <transform name="toWorld">
             <scale x="8" y="8" z="1"/>
-            <lookat origin="0,0,30" target="0,0,0" up="0,1,0"/>
+            <lookat origin="0,0,15" target="0,0,0" up="0,1,0"/>
         </transform>
         <emitter type="area">
             <rgb name="radiance" value="4,4,4"/>
