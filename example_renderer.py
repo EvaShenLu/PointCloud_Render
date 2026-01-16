@@ -36,6 +36,10 @@ class XMLTemplates:
         <float name="intIOR" value="1.46"/>
         <rgb name="diffuseReflectance" value="1,1,1"/>
     </bsdf>
+    
+    <emitter type="constant">
+        <rgb name="radiance" value="4,4,4"/>
+    </emitter>
 """
     # XML template for a single point (ball) in the scene
     BALL_SEGMENT = """
@@ -64,11 +68,11 @@ class XMLTemplates:
     <shape type="rectangle">
         <transform name="toWorld">
             <scale x="8" y="8" z="1"/>
-            <lookat origin="0,0,30" target="0,0,0" up="0,1,0"/>
+            <lookat origin="0,0,20" target="0,0,0" up="0,1,0"/>
         </transform>
-        <emitter type="area">
-            <rgb name="radiance" value="4,4,4"/>
-        </emitter>
+        <bsdf type="diffuse">
+            <rgb name="reflectance" value="1,1,1"/>
+        </bsdf>
     </shape>
 </scene>
 """
