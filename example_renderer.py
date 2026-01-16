@@ -36,10 +36,6 @@ class XMLTemplates:
         <float name="intIOR" value="1.46"/>
         <rgb name="diffuseReflectance" value="1,1,1"/>
     </bsdf>
-    
-    <emitter type="constant">
-        <rgb name="radiance" value="4,4,4"/>
-    </emitter>
 """
     # XML template for a single point (ball) in the scene
     BALL_SEGMENT = """
@@ -61,18 +57,18 @@ class XMLTemplates:
         <ref name="bsdf" id="surfaceMaterial"/>
         <transform name="toWorld">
             <scale x="10" y="10" z="1"/>
-            <translate x="0" y="0" z="{floor_z}"/>
+            <translate x="0" y="0" z="-0.2"/>
         </transform>
     </shape>
     
     <shape type="rectangle">
         <transform name="toWorld">
             <scale x="8" y="8" z="1"/>
-            <lookat origin="0,0,20" target="0,0,0" up="0,1,0"/>
+            <lookat origin="0,0,15" target="0,0,0" up="0,1,0"/>
         </transform>
-        <bsdf type="diffuse">
-            <rgb name="reflectance" value="1,1,1"/>
-        </bsdf>
+        <emitter type="area">
+            <rgb name="radiance" value="4,4,4"/>
+        </emitter>
     </shape>
 </scene>
 """
@@ -121,9 +117,6 @@ class PointCloudRenderer:
         pcl_range = pcl_max - pcl_min
         pcl_center = (pcl_min + pcl_max) / 2.0
         
-        # Calculate floor position: slightly below the lowest point
-        floor_z = pcl_min[2] - 0.05  # 0.05 units below the lowest point
-        
         for idx, point in enumerate(pcl):
             normalized_point = (point - pcl_min) / (pcl_range + 1e-8)
             color = self.compute_color(
@@ -131,7 +124,7 @@ class PointCloudRenderer:
                 noise_seed=idx)
             xml_segments.append(self.XML_BALL_SEGMENT.format(
                 point[0], point[1], point[2], *color))
-        xml_segments.append(self.XML_TAIL.format(floor_z=floor_z))
+        xml_segments.append(self.XML_TAIL)
         return ''.join(xml_segments)
 
     @staticmethod
