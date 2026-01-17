@@ -188,19 +188,11 @@ class TrajectoryBallRenderer:
         ))
 
     @staticmethod
-    def standardize_point_cloud(pcl, center=None, scale=None):
-        """标准化点云位置信息，保留速度信息
-        
-        Args:
-            pcl: 点云数据 (N, 3) 或 (N, 6)
-            center: 可选的全局中心点，如果为None则从当前点云计算
-            scale: 可选的全局缩放因子，如果为None则从当前点云计算
-        """
+    def standardize_point_cloud(pcl):
+        """标准化点云位置信息，保留速度信息"""
         positions = pcl[:, :3]
-        if center is None:
-            center = np.mean(positions, axis=0)
-        if scale is None:
-            scale = np.amax(positions - np.amin(positions, axis=0))
+        center = np.mean(positions, axis=0)
+        scale = np.amax(positions - np.amin(positions, axis=0))
         normalized_positions = ((positions - center) / scale).astype(np.float32)
         
         if pcl.shape[1] == 6:
@@ -370,22 +362,15 @@ class TrajectoryBallRenderer:
     def save_scene(output_file_path, rendered_scene):
         mi.util.write_bitmap(f'{output_file_path}.png', rendered_scene)
 
-    def process(self, frame_index=0, total_frames=220, global_center=None, global_scale=None):
-        """处理单帧点云：标准化、坐标变换、渲染
-        
-        Args:
-            frame_index: 帧索引
-            total_frames: 总帧数
-            global_center: 全局中心点（用于统一缩放）
-            global_scale: 全局缩放因子（用于统一缩放）
-        """
+    def process(self, frame_index=0, total_frames=220):
+        """处理单帧点云：标准化、坐标变换、渲染"""
         self.curve_files = []
         
         pcl = self.load_point_cloud()
         if len(pcl.shape) == 3:
             pcl = pcl[0]
         
-        pcl = self.standardize_point_cloud(pcl, center=global_center, scale=global_scale)
+        pcl = self.standardize_point_cloud(pcl)
         pcl = self.transform_coordinates(pcl)
         
         output_filename = f'frame_{frame_index:04d}_b0' if frame_index > 199 else self.filename
@@ -472,31 +457,6 @@ def main():
     print(f'Output folder: {output_folder}')
     print('=' * 60)
     
-    # 计算全局的center和scale，确保所有帧使用相同的缩放
-    print('\nCalculating global scale and center from all frames...')
-    all_positions = []
-    temp_renderer = TrajectoryBallRenderer(ply_files[0], output_folder=output_folder)
-    for ply_file in ply_files:
-        try:
-            temp_renderer.file_path = ply_file
-            pcl = temp_renderer.load_point_cloud()
-            if len(pcl.shape) == 3:
-                pcl = pcl[0]
-            all_positions.append(pcl[:, :3])
-        except Exception as e:
-            print(f'Warning: Failed to load {os.path.basename(ply_file)} for global scale: {e}')
-    
-    if all_positions:
-        all_positions = np.vstack(all_positions)
-        global_center = np.mean(all_positions, axis=0)
-        global_scale = np.amax(all_positions - np.amin(all_positions, axis=0))
-        print(f'Global center: {global_center}')
-        print(f'Global scale: {global_scale}')
-    else:
-        print('Warning: No valid frames found for global scale calculation, using per-frame scaling')
-        global_center = None
-        global_scale = None
-    
     try:
         for idx, ply_file in enumerate(ply_files):
             print(f'\n[{idx+1}/{total_files}] ({(idx+1)*100//total_files}%) Processing: {os.path.basename(ply_file)}')
@@ -504,7 +464,7 @@ def main():
             try:
                 frame_index = frame_numbers[idx]  # 使用实际的帧号
                 renderer = TrajectoryBallRenderer(ply_file, output_folder=output_folder)
-                renderer.process(frame_index, total_frames, global_center=global_center, global_scale=global_scale)
+                renderer.process(frame_index, total_frames)
                 print(f'✓ Successfully processed: {os.path.basename(ply_file)}')
             except Exception as e:
                 print(f'✗ Error processing {os.path.basename(ply_file)}: {str(e)}')

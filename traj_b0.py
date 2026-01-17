@@ -37,28 +37,6 @@ class FixedFrame199Renderer(TrajectoryBallRenderer):
     </bsdf>
 """
     
-    # 覆盖XML_TAIL，延伸白底以覆盖背景
-    XML_TAIL = """
-    <shape type="rectangle">
-        <ref name="bsdf" id="surfaceMaterial"/>
-        <transform name="toWorld">
-            <scale x="20" y="20" z="1"/>
-            <translate x="10.0" y="10.0" z="-0.8"/>
-        </transform>
-    </shape>
-    
-    <shape type="rectangle">
-        <transform name="toWorld">
-            <scale x="8" y="8" z="1"/>
-            <lookat origin="0,0,15" target="0,0,0" up="0,1,0"/>
-        </transform>
-        <emitter type="area">
-            <rgb name="radiance" value="4,4,4"/>
-        </emitter>
-    </shape>
-</scene>
-"""
-    
     @staticmethod
     def transform_coordinates(pcl):
         """坐标变换：重新排列位置和速度坐标，统一坐标系（不flip x，保持物理真实坐标）"""
@@ -82,37 +60,10 @@ class FixedFrame199Renderer(TrajectoryBallRenderer):
             return pcl
     
     @staticmethod
-    def compute_camera_position(frame_index=0, total_frames=220):
-        """根据帧数计算相机位置（从远到近的动画）
-        0-199帧：从起始位置拉近到中间位置
-        200-219帧：从中间位置拉近到最终位置(-1.0, -2.0, 0.7)
-        """
-        last_motion_frame = 199
-        fade_frames = 20
-        
-        # 最终位置（第219帧）
-        final_pos = (-1.0, -2.0, 0.7)
-        
-        # 中间位置（第199帧）- 比最终位置稍远一些
-        mid_pos = (-1.3, -2.5, 0.8)
-        
-        # 起始位置（第0帧）- 更远的位置
-        start_pos = (-2.2, -3.3, 2.0)
-        
-        if frame_index <= last_motion_frame:
-            # 0-199帧：从起始位置拉近到中间位置
-            progress = frame_index / max(last_motion_frame, 1)
-            origin_x = start_pos[0] + (mid_pos[0] - start_pos[0]) * progress
-            origin_y = start_pos[1] + (mid_pos[1] - start_pos[1]) * progress
-            origin_z = start_pos[2] + (mid_pos[2] - start_pos[2]) * progress
-        else:
-            # 200-219帧：从中间位置拉近到最终位置
-            fade_progress = (frame_index - last_motion_frame) / max(fade_frames, 1)
-            origin_x = mid_pos[0] + (final_pos[0] - mid_pos[0]) * fade_progress
-            origin_y = mid_pos[1] + (final_pos[1] - mid_pos[1]) * fade_progress
-            origin_z = mid_pos[2] + (final_pos[2] - mid_pos[2]) * fade_progress
-        
-        return origin_x, origin_y, origin_z
+    def compute_camera_position(frame_index=199, total_frames=220):
+        """始终返回第199帧的相机位置（调整到右侧面）"""
+        # 相机位置：从右侧面观察，y取反修正左右镜像问题
+        return -1.0, -2.0, 0.7
     
     def _add_velocity_trail(self, xml_segments, position, velocity, point_index=0, frame_index=199):
         """使用第199帧的尾迹长度参数（length_scale = 1.0）"""
@@ -137,8 +88,8 @@ class FixedFrame199Renderer(TrajectoryBallRenderer):
         vel_normalized = min(vel_norm / 10.0, 1.0)  # 归一化速度（假设最大速度约为10）
         trail_length = (base_trail_length + (max_trail_length - base_trail_length) * vel_normalized) * length_scale
         
-        # 速度方向（反方向，因为水滴朝向速度反方向）
-        vel_direction = -velocity / vel_norm
+        # 速度方向（正向，尾迹方向反过来）
+        vel_direction = velocity / vel_norm
         
         # 生成尾迹点：从远端到当前位置
         n_trail_points = 20
@@ -198,28 +149,24 @@ def main():
     input_folder = 'batch_0'
     output_folder = 'render'
     
-    last_motion_frame = 199
-    fade_frames = 20
-    total_frames = last_motion_frame + fade_frames + 1
-    
-    # 渲染全部帧（0-219）
-    start_frame = 0
-    end_frame = 219
-    frame_numbers = list(range(start_frame, end_frame + 1))
-    target_files = []
-    for num in frame_numbers:
-        if num <= last_motion_frame:
-            target_files.append(f'frame_{num:04d}_b0.ply')
-        else:
-            target_files.append(f'frame_0199_b0.ply')
+    # 要渲染的帧号列表
+    target_frames = [139, 159, 179, 199]
     
     os.makedirs(output_folder, exist_ok=True)
     
+    # 根据帧号确定文件名
     ply_files = []
-    for target_file in target_files:
+    frame_numbers = []
+    for frame_num in target_frames:
+        if frame_num <= 199:
+            target_file = f'frame_{frame_num:04d}_b0.ply'
+        else:
+            target_file = f'frame_0199_b0.ply'
+        
         file_path = os.path.join(input_folder, target_file)
         if os.path.isfile(file_path):
             ply_files.append(file_path)
+            frame_numbers.append(frame_num)
         else:
             print(f'Warning: File not found: {file_path}')
     
@@ -230,6 +177,8 @@ def main():
     total_files = len(ply_files)
     print(f'Found {total_files} target file(s) in folder: {input_folder}')
     print(f'Output folder: {output_folder}')
+    print(f'Rendering frames: {target_frames}')
+    print(f'Using frame 199 parameters (camera position and trail length)')
     print('=' * 60)
     
     try:

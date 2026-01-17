@@ -40,7 +40,7 @@ class XMLTemplates:
     # XML template for a single point (ball) in the scene
     BALL_SEGMENT = """
     <shape type="sphere">
-        <float name="radius" value="0.02"/>
+        <float name="radius" value="0.015"/>
         <transform name="toWorld">
             <translate x="{}" y="{}" z="{}"/>
         </transform>
@@ -64,7 +64,7 @@ class XMLTemplates:
     <shape type="rectangle">
         <transform name="toWorld">
             <scale x="8" y="8" z="1"/>
-            <lookat origin="0,0,15" target="0,0,0" up="0,1,0"/>
+            <lookat origin="0,0,14" target="0,0,0" up="0,1,0"/>
         </transform>
         <emitter type="area">
             <rgb name="radiance" value="4,4,4"/>
@@ -209,9 +209,9 @@ def main(argv):
     input_folder = 'ply'
     output_folder = 'render'
     
-    # Only render specified frames: 3, 145, 113, 56, 12, 17
-    target_indices = [3, 145, 113, 56, 12, 17]
-    target_files = [f'pts_{i}.ply' for i in target_indices]
+    start_idx = 0
+    end_idx = 661
+    target_files = [f'pts_{i}.ply' for i in range(start_idx, end_idx + 1)]
     
     os.makedirs(output_folder, exist_ok=True)
     
