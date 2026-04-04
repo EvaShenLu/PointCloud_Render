@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 批量渲染 to_render 文件夹下的所有点云文件
-- 使用 example_renderer.py 渲染包含 airplane 或 car 的文件夹
+- 使用 airplane_example_renderer.py 渲染包含 airplane 或 car 的文件夹
 - 使用 chair_example_renderer.py 渲染包含 chair 的文件夹
 """
 import numpy as np
@@ -13,7 +13,7 @@ from plyfile import PlyData
 import mitsuba as mi
 
 
-# ========== 从 example_renderer.py 导入的渲染器 ==========
+# ========== 从 airplane_example_renderer.py 导入的渲染器 ==========
 class XMLTemplatesStandard:
     HEAD = """
 <scene version="0.6.0">
