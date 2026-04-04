@@ -9,6 +9,7 @@ import sys
 import os
 import glob
 import re
+import argparse
 from plyfile import PlyData
 import mitsuba as mi
 
@@ -46,15 +47,13 @@ class XMLTemplatesStandard:
 """
     BALL_SEGMENT = """
     <shape type="sphere">
-        <float name="radius" value="0.015"/>
+        <float name="radius" value="{radius}"/>
         <transform name="toWorld">
-            <translate x="{}" y="{}" z="{}"/>
+            <translate x="{x}" y="{y}" z="{z}"/>
         </transform>
-
-    <bsdf type="diffuse">
-        <rgb name="reflectance" value="{},{},{}"/>
-    </bsdf>
-
+        <bsdf type="diffuse">
+            <rgb name="reflectance" value="{r},{g},{b}"/>
+        </bsdf>
     </shape>
 """
     TAIL = """
@@ -112,15 +111,13 @@ class XMLTemplatesChair:
 """
     BALL_SEGMENT = """
     <shape type="sphere">
-        <float name="radius" value="0.015"/>
+        <float name="radius" value="{radius}"/>
         <transform name="toWorld">
-            <translate x="{}" y="{}" z="{}"/>
+            <translate x="{x}" y="{y}" z="{z}"/>
         </transform>
-
-    <bsdf type="diffuse">
-        <rgb name="reflectance" value="{},{},{}"/>
-    </bsdf>
-
+        <bsdf type="diffuse">
+            <rgb name="reflectance" value="{r},{g},{b}"/>
+        </bsdf>
     </shape>
 """
     TAIL = """
@@ -146,13 +143,14 @@ class XMLTemplatesChair:
 
 
 class PointCloudRenderer:
-    def __init__(self, file_path, output_folder=None, use_chair_renderer=False):
+    def __init__(self, file_path, output_folder=None, use_chair_renderer=False, radius=0.015):
         self.file_path = file_path
         self.folder, full_filename = os.path.split(file_path)
         self.folder = self.folder or '.'
         self.filename, _ = os.path.splitext(full_filename)
         self.output_folder = output_folder
         self.use_chair_renderer = use_chair_renderer
+        self.radius = radius
         
         # 根据渲染器类型选择模板
         if use_chair_renderer:
@@ -206,7 +204,9 @@ class PointCloudRenderer:
                 normalized_point[0], normalized_point[1], normalized_point[2], 
                 noise_seed=idx)
             xml_segments.append(self.XML_BALL_SEGMENT.format(
-                point[0], point[1], point[2], *color))
+                radius=self.radius,
+                x=point[0], y=point[1], z=point[2],
+                r=color[0], g=color[1], b=color[2]))
         xml_segments.append(tail_template)
         return ''.join(xml_segments)
 
@@ -295,67 +295,80 @@ def determine_renderer_type(folder_name):
 
 
 def main():
+    parser = argparse.ArgumentParser(description='Batch render PLY point clouds with Mitsuba (auto-select renderer by folder name)')
+    parser.add_argument('--input', type=str, default='to_render',
+                        help='Input base folder containing subfolders with .ply files (default: to_render)')
+    parser.add_argument('--output', type=str, default=None,
+                        help='Output base folder for PNGs (default: <input>_rendered)')
+    parser.add_argument('--radius', type=float, default=0.015,
+                        help='Ball radius (default: 0.015)')
+    parser.add_argument('--test', type=int, default=None,
+                        help='Quick test: only render first N files per folder')
+    args = parser.parse_args()
+
+    input_base = args.input
+    output_base = args.output or f'{input_base.rstrip("/")}_rendered'
+
+    if not os.path.isdir(input_base):
+        print(f'Error: input folder not found: {input_base}')
+        return
+
     PointCloudRenderer.init_mitsuba_variant()
     print('=' * 60)
-    
-    # 使用脚本所在目录作为基础目录
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    input_base = os.path.join(base_dir, 'to_render')
-    output_base = os.path.join(base_dir, 'render_results')
-    
-    # 获取所有文件夹（排除 render_indices.txt 等文件）
-    folders = [f for f in os.listdir(input_base) 
+
+    folders = [f for f in os.listdir(input_base)
                if os.path.isdir(os.path.join(input_base, f)) and not f.startswith('.')]
-    
+
     if not folders:
         print(f'No folders found in: {input_base}')
         return
-    
-    print(f'Found {len(folders)} folder(s) to process')
+
+    print(f'Input:  {input_base} ({len(folders)} folder(s))')
+    print(f'Output: {output_base}')
+    print(f'Radius: {args.radius}')
     print('=' * 60)
-    
+
     total_processed = 0
     total_errors = 0
-    
+
     for folder_idx, folder_name in enumerate(sorted(folders), 1):
         folder_path = os.path.join(input_base, folder_name)
         ply_folder = os.path.join(folder_path, 'ply')
-        
-        # 确定渲染器类型
+
         use_chair_renderer = determine_renderer_type(folder_name)
         renderer_type = "Chair Renderer" if use_chair_renderer else "Standard Renderer"
-        
+
         print(f'\n[{folder_idx}/{len(folders)}] Processing folder: {folder_name}')
         print(f'  Renderer type: {renderer_type}')
         print('-' * 60)
-        
-        # 查找所有 .ply 文件
+
         if os.path.exists(ply_folder):
             ply_files = sorted(glob.glob(os.path.join(ply_folder, '*.ply')))
         else:
-            # 如果没有 ply 子文件夹，直接在文件夹中查找
             ply_files = sorted(glob.glob(os.path.join(folder_path, '*.ply')))
-        
+
         if not ply_files:
             print(f'  Warning: No .ply files found in {folder_path}')
             continue
-        
+
+        if args.test is not None:
+            ply_files = ply_files[:args.test]
+
         print(f'  Found {len(ply_files)} .ply file(s)')
-        
-        # 创建输出文件夹
+
         output_folder = os.path.join(output_base, folder_name)
         os.makedirs(output_folder, exist_ok=True)
-        
-        # 处理每个文件
+
         folder_processed = 0
         folder_errors = 0
-        
+
         for file_idx, ply_file in enumerate(ply_files, 1):
             file_name = os.path.basename(ply_file)
             print(f'\n  [{file_idx}/{len(ply_files)}] Processing: {file_name}')
             try:
-                renderer = PointCloudRenderer(ply_file, output_folder=output_folder, 
-                                             use_chair_renderer=use_chair_renderer)
+                renderer = PointCloudRenderer(ply_file, output_folder=output_folder,
+                                              use_chair_renderer=use_chair_renderer,
+                                              radius=args.radius)
                 renderer.process()
                 folder_processed += 1
                 total_processed += 1
@@ -363,9 +376,9 @@ def main():
                 print(f'  ✗ Error processing {file_name}: {str(e)}')
                 folder_errors += 1
                 total_errors += 1
-        
+
         print(f'\n  Folder summary: {folder_processed} succeeded, {folder_errors} failed')
-    
+
     print('\n' + '=' * 60)
     print(f'Batch processing completed!')
     print(f'  Total processed: {total_processed} files')

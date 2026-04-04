@@ -2,6 +2,7 @@ import numpy as np
 import sys
 import os
 import glob
+import argparse
 from plyfile import PlyData
 import mitsuba as mi
 
@@ -40,15 +41,13 @@ class XMLTemplates:
     # XML template for a single point (ball) in the scene
     BALL_SEGMENT = """
     <shape type="sphere">
-        <float name="radius" value="0.015"/>
+        <float name="radius" value="{radius}"/>
         <transform name="toWorld">
-            <translate x="{}" y="{}" z="{}"/>
+            <translate x="{x}" y="{y}" z="{z}"/>
         </transform>
-
-    <bsdf type="diffuse">
-        <rgb name="reflectance" value="{},{},{}"/>
-    </bsdf>
-
+        <bsdf type="diffuse">
+            <rgb name="reflectance" value="{r},{g},{b}"/>
+        </bsdf>
     </shape>
 """
     # XML template for the ground plane and the background plane
@@ -79,12 +78,13 @@ class PointCloudRenderer:
     XML_BALL_SEGMENT = XMLTemplates.BALL_SEGMENT
     XML_TAIL = XMLTemplates.TAIL
 
-    def __init__(self, file_path, output_folder=None):
+    def __init__(self, file_path, output_folder=None, radius=0.015):
         self.file_path = file_path
         self.folder, full_filename = os.path.split(file_path)
         self.folder = self.folder or '.'
         self.filename, _ = os.path.splitext(full_filename)
         self.output_folder = output_folder
+        self.radius = radius
 
     @staticmethod
     def compute_color(x, y, z, noise_seed=0):
@@ -126,7 +126,9 @@ class PointCloudRenderer:
                 normalized_point[0], normalized_point[1], normalized_point[2], 
                 noise_seed=idx)
             xml_segments.append(self.XML_BALL_SEGMENT.format(
-                point[0], point[1], point[2], *color))
+                radius=self.radius,
+                x=point[0], y=point[1], z=point[2],
+                r=color[0], g=color[1], b=color[2]))
         xml_segments.append(self.XML_TAIL.format(floor_z=floor_z))
         return ''.join(xml_segments)
 
@@ -202,51 +204,75 @@ class PointCloudRenderer:
             print('Done!')
 
 
-def main(argv):
+def main():
+    parser = argparse.ArgumentParser(description='Batch render PLY point clouds with Mitsuba (chair preset)')
+    parser.add_argument('--input', type=str, default='ply',
+                        help='Input folder containing .ply files (default: ply)')
+    parser.add_argument('--output', type=str, default=None,
+                        help='Output folder for PNGs (default: <input>_rendered)')
+    parser.add_argument('--radius', type=float, default=0.015,
+                        help='Ball radius (default: 0.015)')
+    parser.add_argument('--indices', type=int, nargs='+', default=None,
+                        help='Only render specific pts indices, e.g. --indices 3 56 145')
+    parser.add_argument('--test', type=int, default=None,
+                        help='Quick test: only render first N files')
+    args = parser.parse_args()
+
+    input_folder = args.input
+    output_folder = args.output or f'{input_folder.rstrip("/")}_rendered'
+
+    if not os.path.isdir(input_folder):
+        print(f'Error: input folder not found: {input_folder}')
+        return
+
     PointCloudRenderer.init_mitsuba_variant()
     print('=' * 60)
-    
-    input_folder = 'ply'
-    output_folder = 'render'
-    
-    start_idx = 0
-    end_idx = 661
-    target_files = [f'pts_{i}.ply' for i in range(start_idx, end_idx + 1)]
-    
+
     os.makedirs(output_folder, exist_ok=True)
-    
-    ply_files = []
-    for target_file in target_files:
-        file_path = os.path.join(input_folder, target_file)
-        if os.path.isfile(file_path):
-            ply_files.append(file_path)
-        else:
-            print(f'Warning: File not found: {file_path}')
-    
+
+    if args.indices is not None:
+        target_files = [f'pts_{i}.ply' for i in args.indices]
+        ply_files = []
+        for tf in target_files:
+            fp = os.path.join(input_folder, tf)
+            if os.path.isfile(fp):
+                ply_files.append(fp)
+            else:
+                print(f'Warning: file not found: {fp}')
+    else:
+        all_ply = [f for f in os.listdir(input_folder) if f.endswith('.ply')]
+        all_ply.sort(key=lambda x: int(x.replace('pts_', '').replace('.ply', ''))
+                     if x.startswith('pts_') else x)
+        ply_files = [os.path.join(input_folder, f) for f in all_ply]
+
+    if args.test is not None:
+        ply_files = ply_files[:args.test]
+
     if not ply_files:
-        print(f'No target files found in folder: {input_folder}')
-        print(f'Looking for: {target_files}')
+        print(f'No .ply files found in: {input_folder}')
         return
-    
+
     total_files = len(ply_files)
-    print(f'Found {total_files} target file(s) in folder: {input_folder}')
-    print(f'Output folder: {output_folder}')
+    print(f'Input:  {input_folder} ({total_files} files to render)')
+    print(f'Output: {output_folder}')
+    print(f'Radius: {args.radius}')
     print('=' * 60)
-    
+
     for idx, ply_file in enumerate(ply_files, 1):
         print(f'\n[{idx}/{total_files}] ({idx*100//total_files}%) Processing: {os.path.basename(ply_file)}')
         print('-' * 60)
         try:
-            renderer = PointCloudRenderer(ply_file, output_folder=output_folder)
+            renderer = PointCloudRenderer(ply_file, output_folder=output_folder,
+                                          radius=args.radius)
             renderer.process()
             print(f'✓ Successfully processed: {os.path.basename(ply_file)}')
         except Exception as e:
             print(f'✗ Error processing {os.path.basename(ply_file)}: {str(e)}')
-    
+
     print('\n' + '=' * 60)
     print(f'Batch processing completed! Processed {total_files} files.')
     print(f'Output files saved to: {output_folder}/')
 
 
 if __name__ == '__main__':
-    main(sys.argv)
+    main()
